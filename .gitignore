@@ -1,0 +1,35 @@
+# Compiled binaries
+ioc_scanner
+*.o
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Sensitive data - DO NOT COMMIT
+.agent_key
+*.key
+*.pem
+*.secret
+
+# Runtime data (regenerate on deploy)
+incidents.json
+inventory.json
+logs/
+reports/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.bak
+*~

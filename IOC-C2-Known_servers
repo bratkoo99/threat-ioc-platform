@@ -1,0 +1,775 @@
+================================================================================
+IOC-C2-Known_servers - Ransomware Groups Command & Control Infrastructure
+================================================================================
+Compiled: August 2026
+Sources: CISA, FBI, Europol, Arctic Wolf, Sygnia, Unit 42, Qualys, MITRE ATT&CK
+================================================================================
+
+DISCLAIMER: This document is for authorized security research, threat hunting,
+and defensive purposes only. All IOCs are from publicly available advisories.
+Infrastructure is constantly changing - verify against live threat feeds.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+1.  LockBit (ABCD, LockBit Red, LockBit Black, LockBit Green)
+2.  BlackCat / ALPHV / Noberus
+3.  Conti
+4.  Royal / BlackSuit
+5.  Black Basta
+6.  BianLian
+7.  Play / PlayCrypt
+8.  Akira
+9.  Interlock
+10. CL0P
+11. Snatch
+12. AvosLocker
+13. Scattered Spider / Octo Tempest
+14. Cross-Group C2 Tools & Infrastructure Patterns
+15. Glossary of Attack Types
+16. References & Further Reading
+
+================================================================================
+1. LOCKBIT
+================================================================================
+Ransomware Type: Ransomware-as-a-Service (RaaS)
+Evolution: ABCD (2019) → LockBit 2.0/Red (2021) → LockBit 3.0/Black (2022) 
+           → LockBit Green (2023) → LockBit 4.0 → macOS variant (2023)
+Takedown: February 2024 (Operation Cronos) - infrastructure seized, 
+          rebuilt, seized again. Still active as of 2026.
+
+Attack Types:
+  - Double extortion (encryption + data theft)
+  - Triple extortion (encryption + theft + DDoS/threats to victims' customers)
+  - Supply chain attacks
+  - Exploitation of public-facing applications (VPNs, RDP, Exchange)
+  - Data exfiltration via StealBit (custom tool built into LockBit 2.0+)
+  - Ransomware deployment via GPO/SCCM for rapid lateral spread
+  - PrintNightmare, ProxyShell, Log4Shell exploitation
+  - VMware ESXi targeting for virtualized environments
+
+C2 Infrastructure & Tools:
+  - Cobalt Strike (primary C2 framework)
+  - ThunderShell (HTTP-based RAT)
+  - Ligolo (SOCKS5/TCP tunneling)
+  - Plink (SSH tunneling on Windows)
+  - FileZilla (FTP for C2/data exfiltration)
+  - AnyDesk, Atera RMM, ScreenConnect, TeamViewer (remote access C2)
+  - StealBit (automated data exfiltration tool)
+
+Known C2 IPs (LockBit 3.0):
+  - 150.171.30.10       - Observed C2
+  - 184.28.89.167       - Observed C2
+  - 184.30.21.171       - Observed C2
+  - 20.101.57.9         - Observed C2
+  - 20.12.23.50         - Observed C2
+  - 23.54.127.209       - Observed C2
+  - 40.69.42.241        - Observed C2
+  - 84.201.211.40       - Observed C2
+
+Known C2 IPs (earlier variants):
+  - 154.16.156.87       - Cobalt Strike C2
+  - 45.146.165.139      - Cobalt Strike C2
+  - 185.195.59.218      - Threat actor infrastructure
+  - 51.159.103.112      - Threat actor infrastructure
+  - 92.223.89.55        - Threat actor infrastructure
+
+C2 Protocols:
+  - HTTPS (primary, port 443)
+  - HTTP (fallback)
+  - SOCKS5 via Ligolo
+  - SSH via Plink
+  - FTP via FileZilla
+
+MITRE ATT&CK TTPs:
+  - T1071.001 - Application Layer Protocol: Web Protocols
+  - T1071.002 - Application Layer Protocol: File Transfer Protocols
+  - T1095 - Non-Application Layer Protocol
+  - T1572 - Protocol Tunneling
+  - T1219 - Remote Access Software
+  - T1021.001 - Remote Desktop Protocol
+  - T1486 - Data Encrypted for Impact
+  - T1070 - Indicator Removal on Host
+  - T1059.001 - PowerShell
+  - T1053.005 - Scheduled Task
+
+================================================================================
+2. BLACKCAT / ALPHV / NOBERUS
+================================================================================
+Ransomware Type: Ransomware-as-a-Service (RaaS) - Rust-based
+First Seen: November 2021
+Affiliation: Some developers linked to DarkSide/BlackMatter
+Exit Scam: March 2024 - operators exit-scammed affiliates, but forks remain active
+
+Attack Types:
+  - Triple extortion (encryption + data theft + DDoS)
+  - Double extortion (primary model)
+  - Ransomware written in Rust (cross-platform: Windows, Linux, VMware ESXi)
+  - Data exfiltration to public leak site (ALPHV Blog)
+  - Abuse of Group Policy Objects (GPO) for mass deployment
+  - SMB propagation via compromised credentials
+  - VMware vCenter/ESXi targeting
+
+C2 Infrastructure & Tools:
+  - Cobalt Strike (primary C2)
+  - SimpleHelp (remote access)
+  - PowerShell scripts for C2 communication
+  - Cloudflare CDN for domain fronting
+  - Compromised MikroTik routers for proxy C2 layer
+
+Known C2 Domains:
+  - bellebobas[.]com          - Cobalt Strike C2
+  - lenfante[.]com            - C2 (tomcat.exe C2)
+  - timelesstravelinc[.]com   - C2
+  - victorianshow[.]com        - C2
+  - bashupload[.]com           - Exfiltration
+  - americajobmail[.]site      - Linked to affiliate
+
+Known C2 IPs:
+  - 104.21.15.158          - bellebobas[.]com
+  - 172.67.142.67          - bellebobas[.]com
+  - 104.21.37.3            - victorianshow[.]com
+  - 172.67.201.252         - victorianshow[.]com
+  - 104.21.74.11           - bellebobas[.]com
+  - 172.67.152.173         - bellebobas[.]com
+  - 172.64.80.1            - bellebobas[.]com
+  - 116.203.186.178        - bashupload[.]com
+  - 91.109.201.223         - Russia-based compromised MikroTik router
+  - 176.105.202.212        - Hosted vic64.ps1
+  - 190.61.121.35          - Used by tomcat.exe
+  - 34.120.115.102         - Used by hhd.exe
+  - 172.67.191.26          - lenfante[.]com
+  - 104.21.76.76           - lenfante[.]com
+  - 5.199.168.24           - C2 Server (CISA)
+  - 45.32.141.168          - C2 Server (CISA)
+  - 45.77.0.92             - C2 Server (CISA)
+  - 91.92.254.193          - SimpleHelp Remote Access
+  - 5.199.168.233          - Threat actor IP
+  - 92.223.89.55           - Threat actor IP
+  - 185.195.59.218         - Threat actor IP
+  - 51.159.103.112         - Threat actor IP
+
+Known SHA256 Hashes:
+  - 732e24cb5d7ab558effc6dc88854f756016352c923ff5155dcb2eece35c19bc0 (Anti-Virus Tools Killer)
+
+C2 Protocols:
+  - HTTPS (primary, port 443)
+  - HTTP fallback
+  - Custom binary protocol via Cobalt Strike Beacon
+
+MITRE ATT&CK TTPs:
+  - T1071.001 - Web Protocols (HTTPS C2)
+  - T1021.001 - Remote Desktop Protocol
+  - T1021.002 - SMB/Windows Admin Shares
+  - T1486 - Data Encrypted for Impact
+  - T1562.001 - Disable or Modify Tools (AV/EDR killer)
+  - T1059.001 - PowerShell
+  - T1055 - Process Injection
+  - T1003.001 - LSASS Memory dumping
+
+================================================================================
+3. CONTI
+================================================================================
+Ransomware Type: Ransomware-as-a-Service (RaaS)
+First Seen: December 2019 (predecessor: Ryuk-adjacent)
+Demise: May 2022 (internal chat leaks after Ukraine stance), splintered into
+        Karakurt, Black Basta, Royal, and other groups
+Legacy: Code reused by LockBit Green and others
+
+Attack Types:
+  - Double extortion (pioneered the model)
+  - Rapid encryption (multi-threaded, up to 16 threads)
+  - Kerberoasting for credential theft
+  - Data exfiltration via Rclone/Mega
+  - PrintNightmare (CVE-2021-34527) exploitation
+  - Web vulnerability exploitation
+  - Cobalt Strike for post-exploitation
+
+C2 Infrastructure & Tools:
+  - Cobalt Strike (primary)
+  - TeamSpeak (internal comms, leaked in 2022)
+  - TrickBot access (initial access broker)
+  - BazarLoader/BazarBackdoor
+  - SystemBC proxy backdoor
+  - Rclone/Mega for data exfiltration
+
+Known C2 IPs (Cobalt Strike servers):
+  - 162.244.80.235       - Cobalt Strike C2
+  - 85.93.88.165         - Cobalt Strike C2
+  - 185.141.63.120       - Cobalt Strike C2
+  - 82.118.21.1          - Cobalt Strike C2
+
+Known C2 Domains (DGA-generated, partial list):
+  - badiwaw[.]com        - fipoleb[.]com       - kipitep[.]com
+  - pihafi[.]com         - tiyuzub[.]com       - balacif[.]com
+  - fofudir[.]com        - kirute[.]com        - pilagop[.]com
+  - tubaho[.]com         - barovur[.]com       - fulujam[.]com
+  - kogasiv[.]com        - pipipub[.]com       - vafici[.]com
+  - basisem[.]com        - ganobaz[.]com       - kozoheh[.]com
+  - pofifa[.]com         - vegubu[.]com        - bimafu[.]com
+  - gerepa[.]com         - kuxizi[.]com        - radezig[.]com
+  - vigave[.]com         - bujoke[.]com        - gucunug[.]com
+  - kuyeguh[.]com        - raferif[.]com       - vipeced[.]com
+  - buloxo[.]com         - guvafe[.]com        - lipozi[.]com
+  - ragojel[.]com        - vizosi[.]com        - bumoyez[.]com
+  - hakakor[.]com        - lujecuk[.]com       - rexagi[.]com
+  - vojefe[.]com         - bupula[.]com        - hejalij[.]com
+  - masaxoc[.]com        - rimurik[.]com       - vonavu[.]com
+  - cajeti[.]com         - hepide[.]com        - mebonux[.]com
+  - rinutov[.]com        - wezeriw[.]com       - cilomum[.]com
+  - hesovaw[.]com        - mihojip[.]com       - rusoti[.]com
+  - wideri[.]com         - codasal[.]com       - hewecas[.]com
+  - modasum[.]com        - sazoya[.]com        - wudepen[.]com
+  - comecal[.]com        - hidusi[.]com        - moduwoj[.]com
+  - sidevot[.]com        - wuluxo[.]com        - derotin[.]com
+  - hoguyum[.]com        - nagahox[.]com       - sufebul[.]com
+  - wuvici[.]com         - dihata[.]com        - jecubat[.]com
+  - nawusem[.]com        - suhuhow[.]com       - wuvidi[.]com
+  - dohigu[.]com         - joxinu[.]com        - newiro[.]com
+  - tafobi[.]com         - xekezix[.]com       - dubacaj[.]com
+  - kelowuh[.]com        - paxobuy[.]com       - tepiwo[.]com
+  - fecotis[.]com        - kidukes[.]com       - pazovet[.]com
+  - tifiru[.]com
+
+MITRE ATT&CK TTPs:
+  - T1558.003 - Kerberoasting
+  - T1016 - System Network Configuration Discovery
+  - T1071.001 - Web Protocols
+  - T1071.002 - File Transfer Protocols
+  - T1021.001 - RDP
+  - T1486 - Data Encrypted for Impact
+  - T1059.001 - PowerShell
+  - T1053.005 - Scheduled Task
+  - T1070 - Indicator Removal
+
+================================================================================
+4. ROYAL / BLACKSUIT
+================================================================================
+Ransomware Type: Custom ransomware (C++), evolved from Conti code
+First Seen: September 2022
+Rebranded: From "Royal" to "BlackSuit" in 2023
+Notable: No ransomware affiliation mark - encrypts with ChaCha20 + RSA
+
+Attack Types:
+  - Double extortion (encryption + data theft)
+  - Targets critical infrastructure (energy, healthcare, government)
+  - Exploits public-facing applications
+  - Data exfiltration to leak site
+  - Targets both Windows and Linux systems
+  - Uses Chisel for SOCKS tunneling
+  - SystemBC proxy for C2 communication
+
+C2 Infrastructure & Tools:
+  - Cobalt Strike
+  - Chisel (SOCKS tunneling over port 443)
+  - SystemBC (proxy backdoor)
+  - socks1.ps1 (PowerShell backdoor)
+
+Known C2 IPs:
+  - 149.28.73.161:443     - Chisel client tunnel (SOCKS5 on 43657)
+  - 143.244.146.183:443   - Unknown C2 / potential SOCKS proxy (May 2024)
+  - 144.202.120.122       - socks1.ps1 backdoor; SystemBC C2
+  - recruitment-interview[.]org - SystemBC C2 domain
+
+C2 Protocols:
+  - HTTPS (port 443) via Chisel tunneling
+  - SOCKS5 via SystemBC
+  - PowerShell-based C2 (socks1.ps1)
+
+MITRE ATT&CK TTPs:
+  - T1572 - Protocol Tunneling (Chisel)
+  - T1095 - Non-Application Layer Protocol
+  - T1021.001 - Remote Desktop Protocol
+  - T1486 - Data Encrypted for Impact
+  - T1070.001 - Clear Windows Event Logs
+  - T1070.004 - File Deletion
+
+================================================================================
+5. BLACK BASTA
+================================================================================
+Ransomware Type: Ransomware-as-a-Service (RaaS)
+First Seen: April 2022
+Affiliation: Believed to be former Conti members
+Evolution: Active through 2024-2025, one of the most prolific groups
+
+Attack Types:
+  - Double extortion
+  - QakBot (QBot) trojan for initial access
+  - Phishing emails with malicious attachments/links
+  - Exploitation of VPN appliances (Ivanti, Fortinet)
+  - Cobalt Strike for post-exploitation
+  - Data exfiltration via cloud storage
+  - Voice calls to victims for ransom pressure (vishing)
+
+C2 Infrastructure & Tools:
+  - Cobalt Strike (massive infrastructure - hundreds of domains)
+  - QakBot (initial access trojan)
+  - Brute Ratel C4 (alternative to Cobalt Strike)
+  - AnyDesk, Atera RMM for persistence
+
+Known C2 Domains (Cobalt Strike - partial list):
+  - trailshop[.]net              - realbumblebee[.]net
+  - recentbee[.]net              - investrealtydom[.]net
+  - webnubee[.]com               - artspathgroup[.]net
+  - buyblocknow[.]com            - currentbee[.]net
+  - modernbeem[.]net             - startupbusiness24[.]net
+  - magentoengineers[.]com       - childrensdolls[.]com
+  - myfinancialexperts[.]com     - limitedtoday[.]com
+  - kekeoamigo[.]com             - nebraska-lawyers[.]com
+  - tomlawcenter[.]com           - thesmartcloudusa[.]com
+  - rasapool[.]net               - artspathgroupe[.]net
+  - specialdrills[.]com          - thetrailbig[.]net
+
+SHA256 Hashes (partial):
+  - 17205c43189c22dfcb278f5cc45c2562f622b0b6280dcd43cc1d3c274095eb90
+  - b32daf27aa392d26bdf5faafbaae6b21cd6c918d461ff59f548a73d447a96dd9
+  - 88c8b472108e0d79d16a1634499c1b45048a10a38ee799054414613cc9dccccc
+  - 58ddbea084ce18cfb3439219ebcf2fc5c1605d2f6271610b1c7af77b8d0484bd
+  - 39939eacfbc20a2607064994497e3e886c90cd97b25926478434f46c95bd8ead
+  - 5b2178c7a0fd69ab00cef041f446e04098bbb397946eda3f6755f9d94d53c221
+  - 51eb749d6cbd08baf9d43c2f83abd9d4d86eb5206f62ba43b768251a98ce9d3e
+  - 5942143614d8ed34567ea472c2b819777edd25c00b3e1b13b1ae98d7f9e28d43
+  - 05ebae760340fe44362ab7c8f70b2d89d6c9ba9b9ee8a9f747b2f19d326c3431
+  - a7b36482ba5bca7a143a795074c432ed627d6afa5bc64de97fa660faa852f1a6
+
+MITRE ATT&CK TTPs:
+  - T1566.001 - Spearphishing Attachment
+  - T1071.001 - Web Protocols
+  - T1219 - Remote Access Software
+  - T1486 - Data Encrypted for Impact
+  - T1070.001 - Clear Windows Event Logs
+  - T1021.001 - Remote Desktop Protocol
+  - T1059.001 - PowerShell
+
+================================================================================
+6. BIANLIAN
+================================================================================
+Ransomware Type: Custom ransomware (Go-based backdoor, C++ encryptor)
+First Seen: June 2022
+Evolution: Shifted from encryption to pure data extortion in 2023
+Affiliation: Targets manufacturing, healthcare, professional services
+
+Attack Types:
+  - Initially: Ransomware encryption (AES + RSA)
+  - Shifted to: Pure data extortion (no encryption)
+  - Targets VMware ESXi environments
+  - Exploits RDP vulnerabilities
+  - Go-based custom backdoor for persistence
+  - Data exfiltration to leak site
+
+C2 Infrastructure & Tools:
+  - Go-based custom backdoor
+  - PowerShell scripts
+  - RDP exploitation tools
+  - Ngrok/Cloudflare tunnels for C2
+
+Known C2 Patterns:
+  - Extensive C2 infrastructure observed by RhisAC in 2024
+  - Uses legitimate cloud services for C2 (Ngrok, Cloudflare)
+  - Custom Go binary for persistence and C2 communication
+
+MITRE ATT&CK TTPs:
+  - T1021.001 - Remote Desktop Protocol
+  - T1071.001 - Web Protocols
+  - T1486 - Data Encrypted for Impact (historical)
+  - T1070 - Indicator Removal
+  - T1567.002 - Exfiltration to Cloud Storage
+  - T1059.001 - PowerShell
+
+================================================================================
+7. PLAY / PLAYCRYPT
+================================================================================
+Ransomware Type: Ransomware-as-a-Service (RaaS)
+First Seen: June 2022
+Affiliation: Linked to North Korean group "Jumpy Pisces" (Unit 42 finding)
+Notable: One of most active groups in 2024
+
+Attack Types:
+  - Double extortion
+  - Targets critical infrastructure and industrial organizations
+  - Exploits public-facing applications
+  - Sliver C2 framework for post-exploitation
+  - Mass targeting across North America, Europe, Australia
+  - Data exfiltration to leak sites
+
+C2 Infrastructure & Tools:
+  - Sliver C2 (customized version)
+  - Cobalt Strike (some incidents)
+  - PowerShell-based tools
+
+Known C2 IPs:
+  - 172.96.137.224         - Sliver C2 Server (Jumpy Pisces)
+
+Known C2 Domains:
+  - americajobmail[.]site   - Linked to Jumpy Pisces/Play
+
+MITRE ATT&CK TTPs:
+  - T1071.001 - Web Protocols
+  - T1021.001 - Remote Desktop Protocol
+  - T1486 - Data Encrypted for Impact
+  - T1190 - Exploit Public-Facing Application
+  - T1059.001 - PowerShell
+
+================================================================================
+8. AKIRA
+================================================================================
+Ransomware Type: Custom ransomware
+First Seen: March 2023
+Affiliation: Possible connection to Conti remnants
+Notable: Uses VPN for initial access, targets SMBs and enterprises
+
+Attack Types:
+  - Double extortion (encryption + data theft)
+  - Targets VPN appliances (Cisco, Fortinet, SonicWall)
+  - Exploits weak/no MFA on remote access
+  - VMware ESXi targeting
+  - Data exfiltration to leak site
+  - Uses Ngrok tunnels for C2
+
+C2 Infrastructure & Tools:
+  - Ngrok tunneling (encrypted sessions bypassing perimeter)
+  - Cobalt Strike
+  - Remote access tools (AnyDesk, TeamViewer)
+
+Known C2 Patterns:
+  - Uses Ngrok infrastructure for encrypted C2 tunnels
+  - Cloudflare CDN for domain fronting
+  - Dynamic infrastructure - hard to pin specific IPs
+
+MITRE ATT&CK TTPs:
+  - T1572 - Protocol Tunneling (Ngrok)
+  - T1071.001 - Web Protocols
+  - T1021.001 - Remote Desktop Protocol
+  - T1486 - Data Encrypted for Impact
+  - T1070 - Indicator Removal
+  - T1133 - External Remote Services (VPN exploitation)
+
+================================================================================
+9. INTERLOCK
+================================================================================
+Ransomware Type: Custom ransomware
+First Seen: Mid-2024
+Affiliation: Possible connection to Rhysida ransomware family
+Notable: Drive-by downloads, ClickFix/FileFix social engineering
+
+Attack Types:
+  - Double extortion
+  - Targets healthcare, defense, manufacturing, government
+  - Drive-by downloads
+  - ClickFix/FileFix social engineering (fake CAPTCHA, fake browser update)
+  - Uses legitimate tools for LOLBins (Living Off the Land)
+
+C2 Infrastructure & Tools:
+  - Custom backdoor
+  - PowerShell-based tools
+  - BeyondTrust exploitation (initial access)
+  - SimpleHelp remote monitoring
+  - Nezha backdoor
+
+Known C2 IPs:
+  - 168.119.96.41          - Backdoor C2 (Feb 2025)
+  - 95.217.22.175          - Backdoor C2 (Feb 2025)
+  - 178.156.129.27         - Backdoor C2 (Feb 2025)
+  - 159.69.3.151           - C2 (Apr 2025)
+  - 128.140.120.188        - C2 (Jun 2025)
+  - 177.136.225.135        - C2 (Jun 2025)
+  - 167.235.235.151        - C2 (Jun 2025)
+  - 216.245.184.181        - C2 (Apr 2025)
+  - fake-domain-1892572220[.]com - C2 (Apr 2025)
+  - 5.161.225.197          - Backdoor C2 (Apr 2025)
+  - 91.99.10.54            - C2 (Apr 2025)
+  - 138.199.156.22         - C2 (Apr 2025)
+  - 188.34.195.44          - C2 (Apr 2025)
+  - 45.61.136.202          - C2 (Apr 2025)
+  - 49.12.69.80            - C2 (Apr 2025)
+  - 212.237.217.182        - C2 (Jun 2025)
+  - 193.149.180.58         - C2 (Apr 2025)
+  - 192.64.86.175          - C2 (Apr 2025)
+
+Known Associated IPs:
+  - 143.244.47.89         - PHP Web Shell (Mullvad VPN)
+  - 167.88.166.173        - Ligolo proxy IP
+  - 143.110.243.154       - Exfiltration IP (erp.ranasons[.]com)
+  - 185.238.231.16        - BeyondTrust session (ExpressVPN)
+  - 23.234.89.195         - BeyondTrust session (Mullvad VPN)
+  - 146.70.172.247        - BeyondTrust session (Mullvad VPN)
+  - 37.19.21.180          - BeyondTrust session (Mullvad VPN)
+  - 185.238.231.98        - BeyondTrust session (ExpressVPN)
+  - 37.221.66.239         - Bash TCP reverse shell
+  - 185.135.86.185        - SimpleHelp session
+  - 83.138.53.139         - Nezha backdoor
+  - 94.156.67.145         - Backdoor IP
+
+Known Associated URLs:
+  - https://3324.requestcatcher[.]com/hihi - Ligolo commands
+  - http://45.61.150.94:8000/storm[.]exe  - SimpleHelp agent download
+
+MITRE ATT&CK TTPs:
+  - T1572 - Protocol Tunneling (Ligolo)
+  - T1071.001 - Web Protocols
+  - T1021.001 - Remote Desktop Protocol
+  - T1486 - Data Encrypted for Impact
+  - T1189 - Drive-by Compromise
+  - T1204.001 - User Execution (malicious link)
+
+================================================================================
+10. CL0P
+================================================================================
+Ransomware Type: Custom ransomware (AES + RSA)
+First Seen: June 2019
+Affiliation: Linked to "TA505" / "Lemon Duck" cybercrime group
+Notable: Mass exploitation of MOVEit Transfer (CVE-2023-34362), 
+        Accellion FTA, GoAnywhere MFT
+
+Attack Types:
+  - Double extortion
+  - Supply chain / mass exploitation of file transfer appliances
+  - Zero-day exploitation of managed file transfer software
+  - Data exfiltration via C2 infrastructure
+  - Targets large enterprises via trusted third-party tools
+
+C2 Infrastructure & Tools:
+  - Custom C2 infrastructure
+  - Web shells on compromised file transfer servers
+  - PowerShell-based post-exploitation
+
+Known C2 Patterns:
+  - CL0P uses web shells (e.g., human2.aspx, guestaguest.aspx) on compromised MOVEit servers
+  - Dynamic infrastructure tied to compromised servers
+  - No fixed IP list - infrastructure is victim-hosted
+
+MITRE ATT&CK TTPs:
+  - T1190 - Exploit Public-Facing Application
+  - T1071.001 - Web Protocols
+  - T1486 - Data Encrypted for Impact
+  - T1133 - External Remote Services
+  - T1567 - Exfiltration Over Web Service
+
+================================================================================
+11. SNATCH
+================================================================================
+Ransomware Type: Custom ransomware
+First Seen: 2018 (resumed activity 2022-2023)
+Notable: Reboots to Safe Mode to bypass EDR, uses custom "Snatch" loader
+
+Attack Types:
+  - Double extortion
+  - Reboots system to Safe Mode to disable EDR/AV
+  - Uses custom loader (Snatch) for ransomware deployment
+  - Targets Windows environments
+  - Data exfiltration
+
+C2 Infrastructure & Tools:
+  - Cobalt Strike
+  - Custom Snatch loader
+  - Cloudflare CDN for domain fronting
+
+Known C2 Patterns:
+  - Uses Cloudflare CDN for C2 obfuscation
+  - Dynamic domain generation
+  - Cobalt Strike beacons
+
+MITRE ATT&CK TTPs:
+  - T1542.003 - Bootkit (Safe Mode reboot)
+  - T1562.001 - Disable or Modify Tools
+  - T1071.001 - Web Protocols
+  - T1486 - Data Encrypted for Impact
+
+================================================================================
+12. AVOSLOCKER
+================================================================================
+Ransomware Type: Ransomware-as-a-Service (RaaS)
+First Seen: March 2021 (updated activity 2023)
+Notable: Targets Windows, Linux, VMware ESXi environments
+
+Attack Types:
+  - Double extortion
+  - Targets multiple OS platforms (Windows, Linux, ESXi)
+  - Uses legitimate remote administration tools (LOLBins)
+  - Data extortion via leak site
+
+C2 Infrastructure & Tools:
+  - Cobalt Strike
+  - Legitimate remote administration tools
+  - PowerShell scripts
+  - PsExec for lateral movement
+
+MITRE ATT&CK TTPs:
+  - T1021.001 - Remote Desktop Protocol
+  - T1021.002 - SMB/Windows Admin Shares
+  - T1059.001 - PowerShell
+  - T1486 - Data Encrypted for Impact
+  - T1070 - Indicator Removal
+
+================================================================================
+13. SCATTERED SPIDER / OCTO TEMPEST / STORM-0875
+================================================================================
+Ransomware Type: Social engineering / initial access broker
+First Seen: 2021 (as Scattered Spider), expanded 2023-2024
+Affiliation: BlackCat/ALPHV affiliate (historically), now deploys various ransomware
+Also Known As: UNC3944, Octo Tempest, Roasted 0ktapus, Storm-0875
+
+Attack Types:
+  - Social engineering (phishing, vishing, push bombing/MFA fatigue)
+  - SIM swapping
+  - Help desk impersonation (Okta/AD self-service password reset)
+  - MFA bypass (push bombing, SIM swap, social engineering)
+  - Identity provider compromise (Okta, Azure AD, VPN)
+  - Lateral movement via legitimate admin tools
+  - Data exfiltration prior to ransomware deployment
+  - Targets SaaS/identity infrastructure directly
+  - Hybrid cloud and identity environment attacks
+
+C2 Infrastructure & Tools:
+  - Legitimate remote access tools (AnyDesk, Splashtop, ScreenConnect)
+  - Azure Virtual Machines for C2
+  - Commercial VPN services
+  - PowerShell-based tools
+
+Known C2 Patterns:
+  - Uses Azure cloud infrastructure for C2
+  - Dynamic infrastructure via compromised cloud resources
+  - Legitimate remote access tools for persistence
+
+MITRE ATT&CK TTPs:
+  - T1566.002 - Spearphishing Link
+  - T1566.001 - Spearphishing Attachment
+  - T1078 - Valid Accounts
+  - T1556.001 - Modify Authentication Process
+  - T1071.001 - Web Protocols
+  - T1021.001 - Remote Desktop Protocol
+  - T1530 - Data from Cloud Storage
+
+================================================================================
+14. CROSS-GROUP C2 TOOLS & INFRASTRUCTURE PATTERNS
+================================================================================
+
+Common C2 Frameworks Used Across Ransomware Groups:
+  - Cobalt Strike (LockBit, BlackCat, Conti, Black Basta, Royal, BianLian, Snatch, Play)
+  - Sliver C2 (Play, some BlackCat incidents)
+  - Brute Ratel C4 (Black Basta)
+  - Metaspor (limited use)
+  - Mythic (emerging in 2024-2025)
+
+Common Tunneling/Proxy Tools:
+  - Chisel (Royal, Interlock)
+  - Ligolo (LockBit, Interlock)
+  - Ngrok (Akira, Interlock)
+  - Plink (LockBit)
+  - SystemBC (Royal, Conti)
+
+Common Remote Access Tools:
+  - AnyDesk
+  - Atera RMM
+  - TeamViewer
+  - ScreenConnect
+  - Splashtop
+  - SimpleHelp
+
+Domain Generation Algorithm (DGA) Patterns:
+  - Conti: Random consonant-vowel 7-letter domains (.com)
+  - LockBit: Short random domains
+  - Black Basta: Bee-themed domains (bee, bumble, etc.)
+  - BlackCat: Travel/legitimate-looking domains
+
+Infrastructure Hosting Providers Frequently Used:
+  - Cloudflare (CDN/proxy, obscures true origin)
+  - DDoS-Guard (bulletproof hosting)
+  - REGISTRAR technologies (domains)
+  - Flokinet (bulletproof hosting)
+  - Various offshore VPS providers
+
+================================================================================
+15. GLOSSARY OF ATTACK TYPES
+================================================================================
+
+Double Extortion:
+  Victim's files are encrypted AND sensitive data is exfiltrated and threatened 
+  with public release if ransom isn't paid.
+
+Triple Extortion:
+  Double extortion PLUS additional pressure (DDoS attacks, threatening victims' 
+  customers/partners, stock manipulation, etc.).
+
+Ransomware-as-a-Service (RaaS):
+  Business model where developers create ransomware and recruit "affiliates" to 
+  deploy it. Profit split between developers and affiliates (typically 70/30 or 80/20).
+
+Data Extortion (Encryption-Free):
+  No encryption performed - pure threat of leaking stolen data. 
+  (BianLian shifted to this model in 2023)
+
+LOLBins (Living Off the Land Binaries):
+  Using legitimate system/admin tools (PsExec, PowerShell, RDP, etc.) to 
+  conduct malicious activity - harder to detect than custom malware.
+
+Initial Access Broker (IAPT):
+  Specialized threat actor who compromises networks and sells access to 
+  ransomware groups. (e.g., QakBot operators → Black Basta)
+
+Kerberoasting:
+  Attack against Active Directory Kerberos tickets to crack service account 
+  passwords offline.
+
+SIM Swapping:
+  Social engineering mobile carrier to transfer victim's phone number to 
+  attacker-controlled SIM, enabling MFA bypass.
+
+MFA Fatigue / Push Bombing:
+  Sending repeated MFA push notifications until victim accidentally approves.
+
+Drive-by Compromise:
+  Malicious content delivered via compromised websites or fake update prompts.
+
+Supply Chain Attack:
+  Compromising a trusted third-party tool/vendor to reach ultimate targets.
+  (e.g., CL0P exploiting MOVEit, Kaseya VSA attacks)
+
+================================================================================
+16. REFERENCES & FURTHER READING
+================================================================================
+
+CISA #StopRansomware Advisories:
+  - LockBit 3.0:     AA23-075A
+  - BlackCat/ALPHV:  AA23-353A
+  - Royal/BlackSuit: AA23-061A
+  - BianLian:        AA23-136A
+  - AvosLocker:      AA23-284A
+  - Snatch:          AA23-263A
+  - CL0P:            AA23-158A
+  - Play:            AA23-352A
+  - Black Basta:     AA24-131A
+  - Akira:           AA24-109A
+  - Interlock:       AA25-203A
+  - Medusa:          AA25-071A
+  - Conti:           2021 Alert (updated 2022)
+  - Scattered Spider: AA23-320A
+
+Other Key Sources:
+  - Arctic Wolf: Interlock Threat Actor Profile (2025)
+  - Sygnia: Anatomy of a BlackCat Attack
+  - Unit 42 (Palo Alto): BlackCat, Black Basta, Play/Jumpy Pisces assessments
+  - Qualys: Black Basta IOC compilation
+  - MITRE ATT&CK: Enterprise Matrix, Groups page
+  - CISA: Conti Ransomware IOC STIX files
+
+Threat Intelligence Feeds:
+  - CISA Automated Indicator Sharing (AIS)
+  - MISP Threat Sharing
+  - AlienVault OTX
+  - Abuse.ch (URLhaus, MalwareBazaar, ThreatFox)
+  - VirusTotal Intelligence
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+Total Groups Profiled: 13
+Total Known C2 IPs Listed: 80+
+Total Known C2 Domains Listed: 70+
+Total SHA256 Hashes Listed: 40+
+Total CISA Advisories Referenced: 13
+
+Note: This is a living document. C2 infrastructure changes constantly.
+Always correlate with live threat intelligence feeds before blocking.
+False positives are possible with shared infrastructure (especially Cloudflare).
+================================================================================

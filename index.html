@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IOC Scanner - Threat Intelligence Platform</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <nav class="sidebar">
+            <div class="logo">
+                <span class="logo-icon">🛡️</span>
+                <span class="logo-text">IOC Scanner</span>
+            </div>
+            <ul class="nav-menu">
+                <li class="nav-item active" data-page="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span class="nav-label">Dashboard</span>
+                </li>
+                <li class="nav-item" data-page="scanner">
+                    <span class="nav-icon">🔍</span>
+                    <span class="nav-label">Scanner</span>
+                </li>
+                <li class="nav-item" data-page="inventory">
+                    <span class="nav-icon">🖥️</span>
+                    <span class="nav-label">Endpoints</span>
+                    <span class="nav-badge" id="endpoint-count">0</span>
+                </li>
+                <li class="nav-item" data-page="incidents">
+                    <span class="nav-icon">🚨</span>
+                    <span class="nav-label">Incidents</span>
+                    <span class="nav-badge" id="incident-count">0</span>
+                </li>
+                <li class="nav-item" data-page="databases">
+                    <span class="nav-icon">🗄️</span>
+                    <span class="nav-label">IOC Databases</span>
+                </li>
+                <li class="nav-item" data-page="reports">
+                    <span class="nav-icon">📋</span>
+                    <span class="nav-label">Reports</span>
+                </li>
+                <li class="nav-item" data-page="agents">
+                    <span class="nav-icon">🔗</span>
+                    <span class="nav-label">Agent Setup</span>
+                </li>
+            </ul>
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <span class="status-dot online"></span>
+                    <span>System Online</span>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="header">
+                <h1 class="page-title" id="page-title">Dashboard</h1>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" id="refresh-btn">🔄 Refresh</button>
+                    <span class="header-time" id="header-time"></span>
+                </div>
+            </header>
+
+            <!-- Dashboard Page -->
+            <div class="page active" id="page-dashboard">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">🖥️</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-endpoints">0</span>
+                            <span class="stat-label">Endpoints</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">✅</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-online">0</span>
+                            <span class="stat-label">Online</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🚨</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-threats">0</span>
+                            <span class="stat-label">Threats</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📋</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-incidents">0</span>
+                            <span class="stat-label">Open Incidents</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🔴</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-critical">0</span>
+                            <span class="stat-label">Critical</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🔍</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-scans">0</span>
+                            <span class="stat-label">Total Scans</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Recent Incidents</h3>
+                            <button class="btn btn-sm" onclick="showPage('incidents'); loadIncidents();">View All</button>
+                        </div>
+                        <div class="card-body" id="recent-incidents">
+                            <div class="empty-state">No incidents</div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Endpoint Status</h3>
+                            <button class="btn btn-sm" onclick="showPage('inventory')">View All</button>
+                        </div>
+                        <div class="card-body" id="endpoint-status">
+                            <div class="empty-state">No endpoints registered</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scanner Page -->
+            <div class="page" id="page-scanner">
+                <div class="scan-container">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Scan Control</h3>
+                        </div>
+                        <div class="card-body">
+                            <div class="form-group">
+                                <label>Target Path</label>
+                                <input type="text" id="scan-path" value="/" placeholder="Enter path to scan">
+                            </div>
+                            <div class="form-group">
+                                <label>Endpoint (optional)</label>
+                                <select id="scan-agent">
+                                    <option value="">Local Machine</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Scan Mode</label>
+                                <select id="scan-mode">
+                                    <option value="full">Full Scan (with hash matching)</option>
+                                    <option value="quick">Quick Scan (skip hashes)</option>
+                                </select>
+                            </div>
+                            <div class="scan-actions">
+                                <button class="btn btn-primary" id="start-scan-btn" onclick="startScan()">
+                                    ▶ Start Scan
+                                </button>
+                                <button class="btn btn-danger" id="stop-scan-btn" onclick="stopScan()" disabled>
+                                    ⏹ Stop
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Scan Progress</h3>
+                            <span class="scan-status" id="scan-status">Idle</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="progress-container">
+                                <div class="progress-bar" id="scan-progress"></div>
+                            </div>
+                            <div class="scan-stats">
+                                <div class="scan-stat">
+                                    <span class="scan-stat-value" id="scan-files">0</span>
+                                    <span class="scan-stat-label">Files Scanned</span>
+                                </div>
+                                <div class="scan-stat">
+                                    <span class="scan-stat-value" id="scan-dirs">0</span>
+                                    <span class="scan-stat-label">Directories</span>
+                                </div>
+                                <div class="scan-stat">
+                                    <span class="scan-stat-value" id="scan-threats">0</span>
+                                    <span class="scan-stat-label">Threats</span>
+                                </div>
+                                <div class="scan-stat">
+                                    <span class="scan-stat-value" id="scan-errors">0</span>
+                                    <span class="scan-stat-label">Errors</span>
+                                </div>
+                            </div>
+                            <div class="current-file">
+                                <span class="current-file-label">Currently scanning:</span>
+                                <span class="current-file-path" id="current-file">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card card-full">
+                        <div class="card-header">
+                            <h3>Detected Threats</h3>
+                        </div>
+                        <div class="card-body">
+                            <div class="threats-list" id="threats-list">
+                                <div class="empty-state">No threats detected</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card card-full">
+                        <div class="card-header">
+                            <h3>Scan Log</h3>
+                        </div>
+                        <div class="card-body">
+                            <div class="scan-log" id="scan-log">
+                                <div class="log-entry log-info">Ready to scan</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Inventory Page -->
+            <div class="page" id="page-inventory">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Endpoint Inventory</h3>
+                        <button class="btn btn-secondary" onclick="refreshInventory()">🔄 Refresh</button>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-container">
+                            <table class="data-table" id="inventory-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Hostname</th>
+                                        <th>IP Address</th>
+                                        <th>OS</th>
+                                        <th>Status</th>
+                                        <th>Last Seen</th>
+                                        <th>Scans</th>
+                                        <th>Threats</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="inventory-body">
+                                    <tr><td colspan="9" class="empty-state">No endpoints registered</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Incidents Page -->
+            <div class="page" id="page-incidents">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Incidents & Alarms</h3>
+                        <div class="header-actions">
+                            <select id="incident-filter" onchange="filterIncidents()">
+                                <option value="all">All</option>
+                                <option value="open">Open</option>
+                                <option value="critical">Critical</option>
+                                <option value="high">High</option>
+                                <option value="resolved">Resolved</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-container">
+                            <table class="data-table" id="incidents-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Time</th>
+                                        <th>Severity</th>
+                                        <th>Title</th>
+                                        <th>Source</th>
+                                        <th>Type</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="incidents-body">
+                                    <tr><td colspan="8" class="empty-state">No incidents</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Databases Page -->
+            <div class="page" id="page-databases">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>IOC Databases</h3>
+                        <button class="btn btn-primary" onclick="showAddDatabase()">+ Add Database</button>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Entries</th>
+                                        <th>Size</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="databases-body">
+                                    <tr><td colspan="4" class="empty-state">No databases</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Reports Page -->
+            <div class="page" id="page-reports">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Scan Reports</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Size</th>
+                                        <th>Modified</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="reports-body">
+                                    <tr><td colspan="4" class="empty-state">No reports</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Agent Setup Page -->
+            <div class="page" id="page-agents">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Agent Deployment</h3>
+                    </div>
+                    <div class="card-body">
+                        <p>Deploy the agent on remote servers to enable centralized scanning and monitoring.</p>
+                        <div class="agent-install">
+                            <h4>Quick Install (one-liner)</h4>
+                            <div class="code-block">
+                                <code id="agent-install-curl">curl -sL http://YOUR_SERVER:8443/api/agent/script | sudo bash -s run</code>
+                                <button class="btn btn-sm" onclick="copyAgentCode()">📋 Copy</button>
+                            </div>
+                            <h4>Manual Install</h4>
+                            <div class="code-block">
+                                <code>wget http://YOUR_SERVER:8443/api/agent/script -O ioc_agent.sh
+chmod +x ioc_agent.sh
+sudo ./ioc_agent.sh register
+sudo ./ioc_agent.sh run &</code>
+                            </div>
+                            <h4>Environment Variables</h4>
+                            <ul>
+                                <li><code>SERVER_URL</code> - URL of this platform server</code></li>
+                                <li><code>SCAN_DIR</code> - Directory to scan (default: /)</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Incident Detail Modal -->
+    <div class="modal" id="incident-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">Incident Detail</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+                <button class="btn btn-primary" id="modal-resolve-btn" onclick="resolveIncident()">Mark Resolved</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
