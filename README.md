@@ -116,7 +116,7 @@ sudo apt install gcc libssl-dev python3
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/threat-ioc-platform.git
+git clone https://github.com/bratkoo99/threat-ioc-platform.git
 cd threat-ioc-platform
 ```
 
