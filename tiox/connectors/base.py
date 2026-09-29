@@ -68,8 +68,24 @@ class Connector(abc.ABC):
     # ---------- helpers for subclasses ----------
 
     def _event(self, **kwargs: Any) -> Event:
-        """Build an Event with this connector's NAME defaulted in."""
+        """
+        Build an Event with this connector's NAME defaulted in.
+
+        ATT&CK techniques are resolved here, from the rule id and optionally the
+        malware family, rather than being set by each connector. Centralising it
+        means a new connector gets technique tagging for free and cannot forget.
+        """
         kwargs.setdefault("source", self.NAME)
+        if "techniques" not in kwargs:
+            from tiox.schemas.attack import techniques_for_event
+
+            family = ""
+            raw = kwargs.get("raw") or {}
+            if isinstance(raw, dict):
+                family = str(raw.get("family") or "")
+            resolved = techniques_for_event(kwargs.get("rule_id") or "", family)
+            if resolved:
+                kwargs["techniques"] = resolved
         try:
             return Event(**kwargs)
         except SchemaError:

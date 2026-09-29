@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TIOX — Threat Investigation Workbench</title>
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+
+  <!-- Login gate. Outside #app so the workbench is not interactive before auth. -->
+  <div id="login-gate">
+    <form id="login-form">
+      <h2>TIOX</h2>
+      <p>Threat investigation workbench</p>
+      <input type="password" id="login-key" class="field" autocomplete="off"
+             autofocus placeholder="session key">
+      <p id="login-error"></p>
+      <button type="submit" class="btn primary">Sign in</button>
+    </form>
+  </div>
+
+  <div class="app" id="app">
+
+    <nav class="sidebar">
+      <div class="logo">
+        <span class="logo-icon">◈</span>
+        <span class="logo-text">TIOX</span>
+      </div>
+
+      <div class="nav-section">Overview</div>
+      <ul class="nav-menu">
+        <li class="nav-item active" data-page="dashboard">
+          <span class="nav-icon">▦</span><span class="nav-label">Dashboard</span>
+        </li>
+        <li class="nav-item" data-page="events">
+          <span class="nav-icon">◔</span><span class="nav-label">Events</span>
+          <span class="nav-badge" id="badge-events">0</span>
+        </li>
+      </ul>
+
+      <div class="nav-section">Hunt</div>
+      <ul class="nav-menu">
+        <li class="nav-item" data-page="endpoints">
+          <span class="nav-icon">▤</span><span class="nav-label">Endpoints</span>
+          <span class="nav-badge" id="badge-endpoints">0</span>
+        </li>
+        <li class="nav-item" data-page="incidents">
+          <span class="nav-icon">◇</span><span class="nav-label">Incidents</span>
+          <span class="nav-badge" id="badge-incidents">0</span>
+        </li>
+        <li class="nav-item" data-page="attack">
+          <span class="nav-icon">◈</span><span class="nav-label">ATT&amp;CK</span>
+          <span class="nav-badge" id="badge-attack">0</span>
+        </li>
+        <li class="nav-item" data-page="rules">
+          <span class="nav-icon">⚙</span><span class="nav-label">Rules</span>
+        </li>
+      </ul>
+
+      <div class="nav-section">Operate</div>
+      <ul class="nav-menu">
+        <li class="nav-item" data-page="scans">
+          <span class="nav-icon">⌸</span>
+          <span>Scans</span>
+          <span class="nav-badge" id="badge-scans">0</span>
+        </li>
+        <li class="nav-item" data-page="scanner">
+          <span class="nav-icon">⌕</span><span class="nav-label">Scanner</span>
+        </li>
+        <li class="nav-item" data-page="agents">
+          <span class="nav-icon">⇄</span><span class="nav-label">Agents</span>
+        </li>
+        <li class="nav-item" data-page="databases">
+          <span class="nav-icon">▥</span><span class="nav-label">Databases</span>
+        </li>
+        <li class="nav-item" data-page="reports">
+          <span class="nav-icon">▧</span><span class="nav-label">Reports</span>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="main">
+      <header class="topbar">
+        <h1 class="page-title" id="page-title">Dashboard</h1>
+        <span class="page-subtitle" id="page-subtitle"></span>
+        <span class="topbar-spacer"></span>
+
+        <!-- The global time window. Every panel reads it, so the analyst always
+             knows the scope of what they are reading. -->
+        <div class="time-picker" id="time-picker">
+          <button data-window="15m">15m</button>
+          <button data-window="1h">1h</button>
+          <button data-window="24h" class="active">24h</button>
+          <button data-window="7d">7d</button>
+          <button data-window="30d">30d</button>
+          <button data-window="all">all</button>
+          <button data-window="custom">custom</button>
+          <input type="datetime-local" id="time-from" title="from">
+          <input type="datetime-local" id="time-to" title="to">
+          <button class="btn sm" id="time-apply">Go</button>
+        </div>
+      </header>
+
+      <div class="content" id="content">
+        <div class="view" id="view-dashboard"></div>
+        <div class="view" id="view-events"></div>
+        <div class="view" id="view-endpoints"></div>
+        <div class="view" id="view-incidents"></div>
+        <div class="view" id="view-attack"></div>
+        <div class="view" id="view-rules"></div>
+        <div class="view" id="view-scans"></div>
+        <div class="view" id="view-scanner"></div>
+        <div class="view" id="view-agents"></div>
+        <div class="view" id="view-databases"></div>
+        <div class="view" id="view-reports"></div>
+        <div class="view" id="view-entity"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <!-- core first: it defines the module the views register against. Each view is
+       a separate file, loaded independently, and registers itself on load. -->
+  <script src="/ui/core.js"></script>
+  <script src="/ui/view-dashboard.js"></script>
+  <script src="/ui/view-events.js"></script>
+  <script src="/ui/view-entity.js"></script>
+  <script src="/ui/view-endpoints.js"></script>
+  <script src="/ui/view-incidents.js"></script>
+  <script src="/ui/view-attack.js"></script>
+  <script src="/ui/view-rules.js"></script>
+  <script src="/ui/view-scans.js"></script>
+  <script src="/ui/view-scanner.js"></script>
+  <script src="/ui/view-agents.js"></script>
+  <script src="/ui/view-data.js"></script>
+  <script src="/ui/view-reports.js"></script>
+  <script src="/ui/shell.js"></script>
+</body>
+</html>

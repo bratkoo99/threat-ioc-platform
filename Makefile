@@ -86,15 +86,33 @@ test check: $(TARGET) lint
 # Cheap syntax gates. threat_platform.sh sat broken (`${NC)` instead of `${NC}`,
 # which swallowed the rest of the line and unbalanced the quotes) across all
 # three original commits, because nothing ever parsed it. Keep it that way fixed.
+SHELLCHECK_FLAGS = -S warning -e SC2129
+
+# shellcheck runs at -S warning, not -S error. At -S error this gate reported
+# "OK" on a script with 17 real findings, because `error` is the only severity
+# bash-level mistakes reach -- a warning-level bug passed silently.
+#
+# SC2129 is excluded: it fires on each sequential `>> file` append in the report
+# writers. Grouping them into a brace block is a micro-optimisation that would
+# make those sections harder to read, and none of them is a defect.
+#
+# Note: the explanation lives here, above the recipe, not inside it. Each recipe
+# line runs in its own shell, so a `#` comment between a backslash-continued
+# pair terminates the `if` and the block silently stops executing.
+lint-shell:
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck $(SHELLCHECK_FLAGS) threat_platform.sh \
+			&& echo "lint: shellcheck OK (warning+, SC2129 excluded)"; \
+	else \
+		echo "lint: shellcheck not installed, skipped"; \
+	fi
+
 lint:
 	@bash -n threat_platform.sh && echo "lint: threat_platform.sh OK"
 	@$(PYTHON) -m compileall -q tiox web_ui_server.py >/dev/null && \
 		echo "lint: python OK"
-	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S error threat_platform.sh && echo "lint: shellcheck OK"; \
-	else \
-		echo "lint: shellcheck not installed, skipped"; \
-	fi
+	@$(MAKE) --no-print-directory lint-shell
+
 
 # Scanner-only smoke test: confirms a known-bad filename fires and that the
 # documented non-zero exit code actually propagates.

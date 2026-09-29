@@ -24,12 +24,10 @@ TIMESTAMP="$(date '+%Y-%m-%d_%H-%M-%S')"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 WHITE='\033[1;37m'
 DIM='\033[2m'
-BOLD='\033[1m'
 NC='\033[0m'
 
 #  ---------------- INIT ----------------
@@ -244,6 +242,10 @@ custom_scan() {
     echo "===================================================" >> "$report_file"
     echo "" >> "$report_file"
     
+    # $flags is intentionally unquoted: it holds several arguments
+    # ("-Q -D 32 -v") assembled in run_custom_scan. Quoting it would pass
+    # "-Q -D 32" as one argument and the scanner would reject the whole run.
+    # shellcheck disable=SC2086
     "$SCANNER_BIN" $flags "$scan_path" 2>&1 | tee -a "$report_file"
     local exit_code=$?
     
@@ -498,6 +500,26 @@ import_iocs() {
 }
 
 #  ---------------- [9] VIEW REPORTS ----------------
+# The Nth report file, or nothing.
+#
+# A glob, not `ls | sed -n Np`: the menu numbers files from a glob while the old
+# lookup parsed ls output, so a filename containing a space made the number the
+# user read resolve to a different file (or none). Both now read this.
+report_at() {
+    local n="$1"
+    local i=1
+    local f
+    for f in "$REPORT_DIR"/*; do
+        [ -f "$f" ] || continue
+        if [ "$i" -eq "$n" ]; then
+            printf '%s\n' "$f"
+            return 0
+        fi
+        i=$((i+1))
+    done
+    return 1
+}
+
 view_reports() {
     echo -e "\n  ${CYAN}===== SCAN REPORTS =====${NC}\n"
     
@@ -529,10 +551,11 @@ view_reports() {
             echo -e "  ${WHITE}Enter report number:${NC}"
             read -r -p "  > " report_num
             local file
-            file=$(ls "$REPORT_DIR"/* 2>/dev/null | sed -n "${report_num}p")
-            if [ -f "$file" ]; then
+            if file=$(report_at "$report_num"); then
                 echo ""
                 cat "$file"
+            else
+                echo -e "  ${RED}No report numbered ${report_num}.${NC}"
             fi
             ;;
         2)
@@ -545,9 +568,9 @@ view_reports() {
             echo -e "  ${WHITE}Select two report numbers to compare:${NC}"
             read -r -p "  > " r1 r2
             local f1 f2
-            f1=$(ls "$REPORT_DIR"/* 2>/dev/null | sed -n "${r1}p")
-            f2=$(ls "$REPORT_DIR"/* 2>/dev/null | sed -n "${r2}p")
-            if [ -f "$f1" ] && [ -f "$f2" ]; then
+            f1=$(report_at "$r1") || f1=""
+            f2=$(report_at "$r2") || f2=""
+            if [ -n "$f1" ] && [ -n "$f2" ] && [ -f "$f1" ] && [ -f "$f2" ]; then
                 echo -e "\n  ${CYAN}=== DIFF ===${NC}\n"
                 diff --color=always "$f1" "$f2" | head -100
             fi

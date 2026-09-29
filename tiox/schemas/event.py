@@ -170,6 +170,10 @@ class Event:
     title: str = ""
     description: str = ""
     rule_id: str | None = None
+    # MITRE ATT&CK technique ids (T1486, T1003, ...). Empty means the detection
+    # is not adversary behaviour -- an agent heartbeat, an operator note -- and
+    # tagging those would pollute technique-level reporting.
+    techniques: list[str] = field(default_factory=list)
     tlp: str = "amber"                               # amber/green/amber+strict, white
     raw: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
@@ -204,6 +208,15 @@ class Event:
             if out:
                 cleaned[etype] = out
         self.entities = cleaned
+        # Drop malformed technique ids rather than rejecting the event: a typo in
+        # a rule's mapping must not cost us the detection itself.
+        if self.techniques:
+            from tiox.schemas.attack import is_valid
+
+            self.techniques = sorted(dict.fromkeys(
+                t for t in (str(x).strip().upper() for x in self.techniques)
+                if is_valid(t)
+            ))
         if not self.title:
             self.title = self.description[:120] or f"{self.type} event"
 

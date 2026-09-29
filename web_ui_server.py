@@ -30,9 +30,16 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from tiox.store.control import ControlPlane
-from tiox.store.pipeline import IngestResult, ingest, migrate_legacy
+from tiox.store.pipeline import (
+    IngestResult,
+    ingest,
+    invalidate_detection,
+    migrate_legacy,
+)
 from tiox.connectors.registry import get as get_connector
 from tiox.schemas.event import EntityType
+from tiox.schemas import attack
+from tiox.store.investigations import parse_window
 
 logging.basicConfig(
     level=os.environ.get("TIOX_LOG", "INFO").upper(),
@@ -146,10 +153,37 @@ AGENT_KEY = os.environ.get("TIOX_AGENT_KEY", "")
 SESSION_KEY = os.environ.get("TIOX_SESSION_KEY", "")
 
 # Endpoints that must work before any credential exists (bootstrap only).
-PUBLIC_PATHS = {"/", "/index.html", "/style.css", "/app.js", "/api/status"}
+# Only the shell and its assets load before login. Everything else, including
+# every /ui/ module, requires a credential: the view files reveal the API
+# surface and the data shapes to anyone who can fetch them.
+# The shell and every view module must load before login, or the page cannot
+# render the login form's target app. They contain no data -- only the API
+# surface and request shapes -- and every /api/ call they make is still
+# authenticated. Denying them just produced a blank page after a correct login.
+UI_ASSETS = {"/ui/index.html", "/ui/app.css", "/ui/core.js", "/ui/shell.js"}
+
+PUBLIC_PATHS = {"/", "/index.html", "/api/status"} | UI_ASSETS
 
 # Agent-facing endpoints authenticate with the agent key.
 AGENT_PATHS = ("/api/agent/register", "/api/agent/heartbeat", "/api/agent/scan")
+
+# The workbench is a directory of independent files rather than one page, so
+# adding a view does not mean editing a monolith. Path traversal is rejected
+# explicitly: the handler resolves under UI_DIR only.
+UI_DIR = os.path.join(PLATFORM_DIR, "ui")
+
+# Attribution for scans initiated locally (from the dashboard or the CLI)
+# rather than reported by an agent.
+LOCAL_SCAN_HOST = os.environ.get("TIOX_LOCAL_HOST", "platform-local")
+
+UI_TYPES = {
+".html": "text/html; charset=utf-8",
+".js": "application/javascript; charset=utf-8",
+".css": "text/css; charset=utf-8",
+".json": "application/json; charset=utf-8",
+".svg": "image/svg+xml",
+".ico": "image/x-icon",
+}
 
 # Name of the browser session cookie set by /api/login.
 SESSION_COOKIE = "tiox_session"
@@ -168,6 +202,28 @@ def ensure_key_file(path, existing=""):
     with os.fdopen(fd, "w") as f:
         f.write(key)
     return key
+
+
+def _looks_like_window(value: str) -> bool:
+    """
+    Whether a time window is one we understand.
+
+    parse_window() falls back to a default on unrecognised input, which is right
+    for a UI filter and wrong for a report: a report over the wrong period is
+    confidently wrong, and nobody notices until they act on it.
+    """
+    v = (value or "").strip().lower()
+    if v in ("all", ""):
+        return True
+    if re.match(r"^\d+[mhd]$", v):
+        return True
+    # An ISO date or timestamp.
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}", v))
+
+
+def _hours_ago(hours: int) -> str:
+    """ISO timestamp `hours` in the past, for a `since` query bound."""
+    return (datetime.now() - timedelta(hours=hours)).isoformat()
 
 
 def _const_eq(a, b):
@@ -424,10 +480,22 @@ def parse_scanner_output(line):
         scan_state["errors"] = int(errors_match.group(1))
 
 
-def run_scan(scan_path, quick_mode=False, agent_id=None):
+def run_scan(scan_path, quick_mode=False, agent_id=None, hash_file=None, pattern_file=None):
     global scan_state
     if scan_state["running"]:
         return False
+
+    # Open a durable scan record before the subprocess starts. Without this the
+    # run has no identity: scan_state is a single global dict, so a second scan
+    # overwrites the first and the platform keeps no history at all.
+    ep = get_store().get_endpoint(agent_id) if agent_id else None
+    hostname = (ep or {}).get("hostname") or LOCAL_SCAN_HOST
+    record = get_store().start_scan(
+        scan_path=scan_path,
+        initiated_by=agent_id or "local",
+        host=hostname,
+    )
+    scan_id = record["scan_id"]
 
     scan_state = {
         "running": True, "files_scanned": 0, "dirs_scanned": 0,
@@ -435,16 +503,28 @@ def run_scan(scan_path, quick_mode=False, agent_id=None):
         "threats": [], "start_time": datetime.now().isoformat(),
         "end_time": None, "scan_path": scan_path,
         "process": None, "progress": 0, "status": "scanning",
-        "agent_id": agent_id
+        "agent_id": agent_id,
+        # The id every event, incident, and finding from this run is tied to.
+        "scan_id": scan_id,
+        "scan_label": record["label"],
+        "seq": record["seq"],
     }
     send_sse_event("scan_start", scan_state)
 
     def scan_thread():
         global scan_state
+        last_persist = 0.0
         try:
             flags = ["-v"]
             if quick_mode:
                 flags = ["-Q", "-v"]
+            # An operator-supplied IOC file lets a scan use a threat feed the
+            # scanner's built-in database does not carry. Without it the only
+            # way to test a custom IOC is to edit C and rebuild.
+            if hash_file:
+                flags += ["-H", hash_file]
+            if pattern_file:
+                flags += ["-P", pattern_file]
             cmd = [SCANNER_BIN] + flags + [scan_path]
             scan_state["process"] = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
@@ -452,6 +532,25 @@ def run_scan(scan_path, quick_mode=False, agent_id=None):
             for line in scan_state["process"].stdout:
                 line = line.rstrip()
                 parse_scanner_output(line)
+                # Persist progress as it happens. If the process is killed, the
+                # run is still in the table with a partial count rather than
+                # being absent, which is the difference between "stopped" and
+                # "never happened".
+                # Throttle the persistence. A verbose scan emits thousands of
+                # lines, and a SQLite write per line holds the store lock long
+                # enough to stall every other request. The final finish_scan()
+                # records the true totals, so a throttled intermediate value is
+                # only ever a progress hint, never the record of truth.
+                now = time.monotonic()
+                if now - last_persist >= 1.0:
+                    last_persist = now
+                    get_store().update_scan(
+                        scan_id,
+                        files_scanned=scan_state["files_scanned"],
+                        dirs_scanned=scan_state["dirs_scanned"],
+                        threats_found=scan_state["threats_found"],
+                        errors=scan_state["errors"],
+                    )
                 send_sse_event("progress", scan_state)
             scan_state["process"].wait()
             scan_state["status"] = "completed"
@@ -463,10 +562,15 @@ def run_scan(scan_path, quick_mode=False, agent_id=None):
             # rather than a dashboard: every scan becomes queryable events.
             payload = {k: v for k, v in scan_state.items() if k != "process"}
             ep = get_store().get_endpoint(agent_id) if agent_id else None
-            context = {
-                "hostname": (ep or {}).get("hostname"),
-                "endpoint": ep or {},
-            }
+            # A scan started from the dashboard has no agent. Leaving host empty
+            # made every per-host summary and host pivot silently empty, which
+            # reads as "nothing happened" rather than "we did not attribute it".
+            if ep:
+                hostname = ep.get("hostname")
+            else:
+                hostname = LOCAL_SCAN_HOST
+                payload = {**payload, "hostname": LOCAL_SCAN_HOST}
+            context = {"hostname": hostname, "endpoint": ep or {}}
             result = ingest_event(payload, source="agent", context=context)
 
             # Link each threat incident to the event that produced it, so an
@@ -504,10 +608,47 @@ def run_scan(scan_path, quick_mode=False, agent_id=None):
                     "type": "malware",
                     "details": threat,
                 }, event_id=linked)
+
+                # Record the finding against this run, and link it to the event
+                # it produced. This is what makes a click on a scan reach the
+                # specific file that was found.
+                store = get_store()
+                sha = sha or None
+                store.record_finding(scan_id, {
+                    "file_path": threat["file"],
+                    "file_hash": sha,
+                    "family": threat.get("family"),
+                    "rule_id": ("builtin.hash_exact" if threat.get("type") == "Known malicious hash"
+                                else "builtin.filename_pattern"),
+                    "severity": ("critical" if threat.get("type") == "Known malicious hash"
+                                 else "high"),
+                    "event_id": linked,
+                })
+                if linked and sha:
+                    store.link_finding_event(scan_id, sha, linked)
+
+            get_store().finish_scan(
+                scan_id, "completed",
+                files_scanned=scan_state["files_scanned"],
+                dirs_scanned=scan_state["dirs_scanned"],
+                threats_found=scan_state["threats_found"],
+                errors=scan_state["errors"],
+            )
         except Exception as e:
             scan_state["status"] = "error"
             scan_state["end_time"] = datetime.now().isoformat()
             scan_state["error"] = str(e)
+            # A failed run is still a run. Recording it as an error is what
+            # stops a broken scan from looking like one that found nothing.
+            try:
+                get_store().finish_scan(
+                    scan_id, "error", error=str(e),
+                    files_scanned=scan_state["files_scanned"],
+                    dirs_scanned=scan_state["dirs_scanned"],
+                    threats_found=scan_state["threats_found"],
+                )
+            except Exception:  # pragma: no cover -- never mask the original error
+                pass
         finally:
             scan_state["running"] = False
             send_sse_event("scan_complete", scan_state)
@@ -559,6 +700,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         """
         if path in PUBLIC_PATHS or path == "/api/login":
             return True
+        if path.startswith("/ui/") and os.path.splitext(path)[1] in (
+            ".html", ".css", ".js", ".svg", ".ico"
+        ):
+            # Static workbench assets. Data still requires a credential; these
+            # are just the view modules, and gating them breaks the login flow.
+            return True
         presented = self._presented_key()
         if not presented:
             return False
@@ -586,7 +733,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         if parsed.path in ("/", "/index.html"):
-            self.serve_file("index.html", "text/html")
+            # The old single-page dashboard is superseded by the workbench in ui/.
+            # Redirecting rather than serving both avoids two divergent UIs.
+            self.serve_ui("index.html")
+        elif parsed.path.startswith("/ui/"):
+            self.serve_ui(parsed.path[len("/ui/"):])
         elif parsed.path == "/api/logout":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -595,10 +746,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             )
             self.end_headers()
             self.wfile.write(json.dumps({"ok": True}).encode())
-        elif parsed.path == "/style.css":
-            self.serve_file("style.css", "text/css")
-        elif parsed.path == "/app.js":
-            self.serve_file("app.js", "application/javascript")
         elif parsed.path == "/api/status":
             self.send_json(scan_state)
         elif parsed.path == "/api/events":
@@ -631,6 +778,38 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.list_events(parsed)
         elif parsed.path == "/api/entity":
             self.pivot_entity(parsed)
+        elif parsed.path == "/api/entity/spread":
+            self.entity_spread_api(parsed)
+        elif parsed.path == "/api/investigations/top":
+            self.top_entities_api(parsed)
+        elif parsed.path == "/api/investigations/timeline":
+            self.timeline_api(parsed)
+        elif parsed.path == "/api/investigations/hosts":
+            self.host_summary_api(parsed)
+        elif parsed.path == "/api/investigations/rules":
+            self.rule_breakdown_api(parsed)
+        elif parsed.path == "/api/investigations/stale":
+            self.stale_endpoints_api(parsed)
+        elif parsed.path == "/api/attack/techniques":
+            self.attack_techniques_api(parsed)
+        elif parsed.path == "/api/attack/technique":
+            self.attack_technique_api(parsed)
+        elif parsed.path == "/api/attack/catalog":
+            self.attack_catalog()
+        elif parsed.path == "/api/scans":
+            self.list_scans_api(parsed)
+        elif parsed.path == "/api/scan":
+            self.get_scan_api(parsed)
+        elif parsed.path == "/api/rules":
+            self.list_rules_api(parsed)
+        elif parsed.path == "/api/rules/schema":
+            self.rules_schema_api()
+        elif parsed.path == "/api/reports/kinds":
+            self.report_kinds_api()
+        elif parsed.path == "/api/reports/generate":
+            self.report_generate_api(parsed)
+        elif parsed.path == "/api/reports/download":
+            self.report_download_api(parsed)
         else:
             self.send_error(404)
 
@@ -682,10 +861,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             scan_path = validate_path(params.get("path", "/"))
             quick_mode = params.get("quick", False)
             agent_id = params.get("agent_id")
+            hash_file = params.get("hash_file")
+            pattern_file = params.get("pattern_file")
             if scan_state["running"]:
                 self.send_json({"error": "Scan already running"}, 409)
             else:
-                success = run_scan(scan_path, quick_mode, agent_id)
+                success = run_scan(scan_path, quick_mode, agent_id,
+                                   hash_file, pattern_file)
                 self.send_json({"started": success})
 
         elif parsed.path == "/api/scan/stop":
@@ -835,6 +1017,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return
             self.send_json({"ok": True})
 
+        elif parsed.path == "/api/rules":
+            self.create_rule_api(self.read_body())
+        elif parsed.path == "/api/rules/test":
+            self.test_rule_api(self.read_body())
+        elif parsed.path == "/api/reports/generate":
+            self.report_generate_api(parsed)
         elif parsed.path == "/api/incidents/create":
             body = self.read_body()
             if body is None:
@@ -856,12 +1044,361 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    # ==================== scans API ====================
+
+    def list_scans_api(self, parsed):
+        """Scan history. Backs the Endpoints "Scans" tile and the scan list."""
+        qs = parse_qs(urlparse(self.path).query)
+        store = get_store()
+        try:
+            limit = min(500, max(1, int(qs.get("limit", ["100"])[0])))
+        except ValueError:
+            limit = 100
+        scans = store.list_scans(
+            host=qs.get("host", [None])[0] or None,
+            status=qs.get("status", [None])[0] or None,
+            limit=limit,
+        )
+        self.send_json({"scans": scans, "stats": store.scan_stats()})
+
+    def get_scan_api(self, parsed):
+        """One scan plus its findings, so a click reaches the files it found."""
+        qs = parse_qs(urlparse(self.path).query)
+        scan_id = qs.get("id", [""])[0]
+        if not scan_id:
+            self.send_error(400)
+            return
+        store = get_store()
+        scan = store.get_scan(scan_id)
+        if not scan:
+            self.send_json({"error": f"no such scan: {scan_id}"}, 404)
+            return
+        findings = store.scan_findings(scan_id)
+        self.send_json({
+            "scan": scan,
+            "findings": findings,
+            "events": [
+                e["event_id"] for e in findings if e.get("event_id")
+            ],
+        })
+
+    # ==================== custom rules API ====================
+
+    def list_rules_api(self, parsed):
+        store = get_store()
+        self.send_json({"rules": store.list_rules()})
+
+    def rules_schema_api(self):
+        """
+        The building blocks the UI offers.
+
+        Served from the engine so the editor cannot drift from what actually
+        evaluates: an operator dropdown built from a hardcoded list in the
+        frontend would eventually accept a rule the backend rejects.
+        """
+        from tiox.rules.engine import COMPARISONS, FIELDS
+
+        self.send_json({
+            "fields": FIELDS,
+            "operators": COMPARISONS,
+            "boolean_ops": ["and", "or", "not"],
+            "severities": ["critical", "high", "medium", "low", "info"],
+            "node_kinds": ["match", "test", "threshold"],
+        })
+
+    def create_rule_api(self, body):
+        if body is None:
+            self.send_json({"error": "Request too large"}, 413)
+            return
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self.send_json({"error": "Invalid JSON"}, 400)
+            return
+        try:
+            saved = get_store().save_rule(data)
+            # The engine caches the enabled rule set. Without this a rule the
+            # analyst just created would not evaluate until the process
+            # restarted, and they would conclude the engine was broken.
+            invalidate_detection()
+        except ValueError as exc:
+            # A validation failure is the author's problem to fix, so report
+            # every problem rather than the first.
+            self.send_json({"error": str(exc), "kind": "validation"}, 400)
+            return
+        self.send_json({"rule": saved}, 201)
+
+    def update_rule_api(self, parsed, body):
+        rule_id = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+        store = get_store()
+        if not store.get_rule(rule_id):
+            self.send_json({"error": f"no such rule: {rule_id}"}, 404)
+            return
+        if body is None:
+            self.send_json({"error": "Request too large"}, 413)
+            return
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self.send_json({"error": "Invalid JSON"}, 400)
+            return
+        # An enable/disable toggle sends {"enabled": bool} and nothing else, so
+        # it must not be treated as a full rule replacement.
+        if set(data.keys()) == {"enabled"}:
+            ok = store.set_rule_enabled(rule_id, bool(data["enabled"]))
+            if ok:
+                invalidate_detection()
+            self.send_json({"ok": ok, "rule": store.get_rule(rule_id)} if ok
+                            else {"error": "not found"}, 200 if ok else 404)
+            return
+        try:
+            saved = store.save_rule(data, rule_id=rule_id)
+            invalidate_detection()
+        except ValueError as exc:
+            self.send_json({"error": str(exc), "kind": "validation"}, 400)
+            return
+        self.send_json({"rule": saved})
+
+    def delete_rule_api(self, parsed):
+        rule_id = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+        if get_store().delete_rule(rule_id):
+            invalidate_detection()
+            self.send_json({"ok": True})
+        else:
+            self.send_json({"error": f"no such rule: {rule_id}"}, 404)
+
+    def test_rule_api(self, body):
+        """
+        Dry-run a rule against recent events.
+
+        This is the feature that makes a rule editor usable: an author needs to
+        see what their rule *would* catch before enabling it, otherwise every
+        new rule is a guess that either floods the queue or never fires.
+        """
+        if body is None:
+            self.send_json({"error": "Request too large"}, 413)
+            return
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self.send_json({"error": "Invalid JSON"}, 400)
+            return
+
+        from tiox.rules.engine import Evaluator, explain, validate
+
+        tree = data.get("tree")
+        if not isinstance(tree, dict):
+            self.send_json({"error": "rule needs a tree object"}, 400)
+            return
+
+        problems = validate(tree)
+        if problems:
+            self.send_json({"error": "; ".join(problems), "kind": "validation",
+                            "problems": problems}, 400)
+            return
+
+        hours = data.get("window_hours", 24)
+        try:
+            hours = min(720, max(1, int(hours)))
+        except (TypeError, ValueError):
+            hours = 24
+
+        store = get_store()
+        events = store.query_events(limit=500, since=_hours_ago(hours))
+        rule = {
+            "id": data.get("rule_id", "test"),
+            "name": data.get("name", "test rule"),
+            "severity": data.get("severity", "medium"),
+            "techniques": data.get("techniques") or [],
+            "tree": tree,
+        }
+        hits = Evaluator().run_rule(rule, events)
+        self.send_json({
+            "valid": True,
+            "explanation": explain(tree),
+            "events_examined": len(events),
+            "hit_count": len(hits),
+            "hits": [h.as_dict() for h in hits[:20]],
+        })
+
+    # ==================== reporting API ====================
+
+    def report_kinds_api(self):
+        """What can be reported, and in which formats.
+
+        Served from the reporting module so the UI cannot offer a kind the
+        backend does not implement, or a format it cannot render.
+        """
+        from tiox import reporting
+
+        self.send_json({
+            "kinds": [
+                {"id": k, "description": v} for k, v in
+                sorted(reporting.REPORT_KINDS.items())
+            ],
+            "formats": [
+                {"id": "json", "label": "JSON", "note": "machine-readable, for other tools"},
+                {"id": "xlsx", "label": "Excel", "note": "one sheet per section, filterable"},
+                {"id": "txt", "label": "Plain text", "note": "for tickets and chat"},
+            ],
+        })
+
+    def _report_params(self, parsed_or_qs):
+        """Pull and validate the report arguments. Raises ValueError on bad input."""
+        from tiox import reporting
+
+        q = parsed_or_qs
+        kind = (q.get("kind", [""])[0] or "").strip().lower()
+        if kind not in reporting.REPORT_KINDS:
+            raise ValueError(
+                f"unknown report kind {kind!r}; known: "
+                f"{', '.join(sorted(reporting.REPORT_KINDS))}"
+            )
+        fmt = (q.get("format", [""])[0] or "").strip().lower()
+        if fmt not in reporting.FORMATS:
+            raise ValueError(
+                f"unsupported format {fmt!r}; choose one of: "
+                f"{', '.join(reporting.FORMATS)}"
+            )
+        window = (q.get("window", ["24h"])[0] or "24h").strip()
+        # parse_window falls back to a default on garbage, which would quietly
+        # produce a report over the wrong period. Reject it instead.
+        from tiox.store.investigations import parse_window
+        if window not in ("all",) and not _looks_like_window(window):
+            raise ValueError(
+                f"unrecognised window {window!r}; use 24h, 7d, all, or an ISO timestamp"
+            )
+        parse_window(window)
+        return {
+            "kind": kind,
+            "format": fmt,
+            "window": window,
+            "scan_id": (q.get("scan_id", [""])[0] or "").strip() or None,
+            "technique": (q.get("technique", [""])[0] or "").strip() or None,
+            "title": (q.get("title", [""])[0] or "").strip() or None,
+        }
+
+    def report_generate_api(self, parsed):
+        """Build a report, write it, and return a descriptor (not the bytes).
+
+        Generation is a POST: it creates a file and does work. The bytes are
+        then fetched from /api/reports/download, so a report can be shared by
+        URL instead of embedded in a JSON response.
+        """
+        from tiox import reporting
+
+        try:
+            args = self._report_params(parse_qs(parsed.query))
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, 400)
+            return
+        try:
+            doc = reporting.build_document(
+                args["kind"], get_store(),
+                window=args["window"],
+                scan_id=args["scan_id"],
+                technique=args["technique"],
+                title=args["title"],
+            )
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, 400)
+            return
+        try:
+            info = reporting.render_to_file(doc, args["format"], REPORT_DIR)
+        except (OSError, ValueError) as exc:
+            self.send_json({"error": f"could not write the report: {exc}"}, 500)
+            return
+        self.send_json({"report": info}, 201)
+
+    def report_download_api(self, parsed):
+        """Serve a saved report. Path traversal is rejected, not sanitised."""
+        from urllib.parse import unquote
+
+        name = unquote(parse_qs(parsed.query).get("name", [""])[0] or "")
+        if not name:
+            self.send_json({"error": "'name' is required"}, 400)
+            return
+        # Reject rather than clean: a name that needs cleaning is a name that
+        # should not have been accepted.
+        if os.path.basename(name) != name or name.startswith("."):
+            self.send_json({"error": "invalid report name"}, 400)
+            return
+        path = os.path.join(REPORT_DIR, name)
+        if not os.path.isfile(path):
+            self.send_json({"error": f"no such report: {name}"}, 404)
+            return
+
+        ext = os.path.splitext(name)[1].lower()
+        from tiox import reporting
+
+        content_type = {
+            ".json": "application/json",
+            ".xlsx": ("application/vnd.openxmlformats-officedocument."
+                      "spreadsheetml.sheet"),
+            ".txt": "text/plain; charset=utf-8",
+        }.get(ext, "application/octet-stream")
+        self.send_bytes(path, content_type, download_name=name)
+
+    def do_PUT(self):
+        parsed = urlparse(self.path)
+        if not self.require_auth(parsed.path):
+            return
+        if parsed.path.startswith("/api/rules/"):
+            self.update_rule_api(parsed, self.read_body())
+        else:
+            self.send_error(404)
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        if not self.require_auth(parsed.path):
+            return
+        if parsed.path.startswith("/api/rules/"):
+            self.delete_rule_api(parsed)
+        else:
+            self.send_error(404)
+
     def read_body(self):
         length = int(self.headers.get("Content-Length", 0))
         # Limit body size to 1MB to prevent DoS
         if length > 1048576:
             return None
         return self.rfile.read(length) if length > 0 else b""
+
+    def serve_ui(self, relpath):
+        """
+        Serve a file from ui/, refusing anything that escapes the directory.
+
+        The workbench is many small files rather than one page, which means the
+        URL carries a path. os.path.realpath + a prefix check is what stops
+        `/ui/../../etc/passwd`; join() alone would happily traverse.
+        """
+        relpath = (relpath or "").strip("/")
+        if not relpath:
+            self.send_error(404)
+            return
+        target = os.path.realpath(os.path.join(UI_DIR, relpath))
+        root = os.path.realpath(UI_DIR)
+        if target != root and not target.startswith(root + os.sep):
+            log.warning("blocked UI path traversal: %r", relpath)
+            self.send_error(403)
+            return
+        if not os.path.isfile(target):
+            self.send_error(404)
+            return
+        ext = os.path.splitext(target)[1].lower()
+        ctype = UI_TYPES.get(ext)
+        if not ctype:
+            self.send_error(403, "Unsupported media type")
+            return
+        with open(target, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", len(body))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
 
     def serve_file(self, filename, content_type):
         filepath = os.path.join(PLATFORM_DIR, filename)
@@ -932,6 +1469,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with sse_lock:
                 if self.wfile in sse_clients:
                     sse_clients.remove(self.wfile)
+
+    def send_bytes(self, path, content_type, download_name=None):
+        """
+        Serve a file as a download.
+
+        The filename is echoed back as Content-Disposition. Header values cannot
+        contain a newline, and a filename is user-influenced, so strip CR/LF and
+        anything outside a safe set rather than trusting the caller.
+        """
+        try:
+            with open(path, "rb") as fh:
+                body = fh.read()
+        except OSError:
+            self.send_error(404)
+            return
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", download_name or "download")
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", len(body))
+        self.send_header(
+            "Content-Disposition", f'attachment; filename="{safe}"')
+        self.end_headers()
+        self.wfile.write(body)
 
     def serve_agent_script(self, tls=True):
         script = self.generate_agent_script(tls=tls)
@@ -1086,13 +1646,29 @@ esac
         self.send_json(dbs)
 
     def list_reports(self):
+        """
+        Saved reports, newest first.
+
+        The kind, format, and window are parsed back out of the filename rather
+        than stored separately: a sidecar index is a second thing to keep in
+        sync, and losing it loses the listing too.
+        """
         reports = []
-        if os.path.exists(REPORT_DIR):
-            for f in os.listdir(REPORT_DIR):
-                filepath = os.path.join(REPORT_DIR, f)
+        if os.path.isdir(REPORT_DIR):
+            for name in sorted(os.listdir(REPORT_DIR), reverse=True):
+                filepath = os.path.join(REPORT_DIR, name)
+                if not os.path.isfile(filepath):
+                    continue
+                stem, ext = os.path.splitext(name)
+                parts = stem.rsplit("-", 2)
                 reports.append({
-                    "name": f, "size": os.path.getsize(filepath),
-                    "modified": datetime.fromtimestamp(os.path.getmtime(filepath)).isoformat()
+                    "name": name,
+                    "size": os.path.getsize(filepath),
+                    "modified": datetime.fromtimestamp(
+                        os.path.getmtime(filepath)).isoformat(),
+                    "format": ext.lstrip("."),
+                    "kind": parts[0] if len(parts) == 3 else "",
+                    "window": parts[1] if len(parts) == 3 else "",
                 })
         self.send_json(reports)
 
@@ -1148,9 +1724,14 @@ esac
             until=(q.get("until") or [None])[0],
             limit=self._clamp_limit(parsed),
         )
-        # raw can be large and the UI does not need it for a list view.
+        # raw can be large and the UI does not need it for a list view. The
+        # entity values ARE needed, though: the table makes them clickable, and
+        # a pivot target the client cannot see is not a pivot.
+        store = get_store()
+        entity_map = store.entities_for_events([r["event_id"] for r in rows])
         for r in rows:
             r.pop("raw", None)
+            r["entities"] = entity_map.get(r["event_id"], {})
         self.send_json({"events": rows, "count": len(rows)})
 
     def pivot_entity(self, parsed):
@@ -1181,8 +1762,10 @@ esac
         total = store.count_by_entity(etype, value)
         hosts = sorted({r.get("host") for r in rows if r.get("host")})
         sources = sorted({r.get("source") for r in rows if r.get("source")})
+        entity_map = store.entities_for_events([r["event_id"] for r in rows])
         for r in rows:
             r.pop("raw", None)
+            r["entities"] = entity_map.get(r["event_id"], {})
         self.send_json({
             "entity": {"type": etype, "value": value.lower()},
             "total": total,
@@ -1196,6 +1779,133 @@ esac
 
     def log_message(self, format, *args):
         pass
+
+    # ==================== investigation API (Phase 1) ====================
+
+    def _window(self, parsed, default_hours: int = 24) -> tuple[str | None, str | None]:
+        """
+        Resolve the time window from the query string.
+
+        The UI's global time picker sends `window=24h|7d|all`, so every panel
+        honours one control. Falling back to a recent default rather than "all
+        time" keeps an unfiltered query from scanning the entire lake.
+        """
+        q = parse_qs(parsed.query)
+        return parse_window((q.get("window") or [None])[0], default_hours)
+
+    def _require_entity(self, parsed):
+        q = parse_qs(parsed.query)
+        etype = (q.get("type") or [""])[0].strip()
+        value = (q.get("value") or [""])[0].strip()
+        if not etype or not value:
+            self.send_json({"error": "Both 'type' and 'value' are required"}, 400)
+            return None
+        valid = {e.value for e in EntityType}
+        if etype not in valid:
+            self.send_json({"error": f"unknown entity type {etype!r}",
+                            "valid": sorted(valid)}, 400)
+            return None
+        return etype, value
+
+    def entity_spread_api(self, parsed):
+        """How far one indicator spread: host count, timeline, families."""
+        pair = self._require_entity(parsed)
+        if not pair:
+            return
+        etype, value = pair
+        since, until = self._window(parsed)
+        self.send_json(get_store().investigations.entity_spread(etype, value, since))
+
+    def top_entities_api(self, parsed):
+        """Most-seen entity values, ranked by host spread rather than raw count."""
+        q = parse_qs(parsed.query)
+        etype = (q.get("type") or ["file_hash"])[0]
+        if etype not in {e.value for e in EntityType}:
+            self.send_json({"error": f"unknown entity type {etype!r}"}, 400)
+            return
+        since, _ = self._window(parsed)
+        rows = get_store().investigations.top_entities(
+            etype, since, self._clamp_limit(parsed, 20, 200)
+        )
+        self.send_json({"entity_type": etype, "count": len(rows), "entities": rows})
+
+    def timeline_api(self, parsed):
+        """Event counts bucketed over time, for the sparkline."""
+        q = parse_qs(parsed.query)
+        bucket = (q.get("bucket") or ["hour"])[0]
+        if bucket not in ("minute", "hour", "day", "week", "month"):
+            self.send_json({"error": f"unknown bucket {bucket!r}",
+                            "valid": ["minute", "hour", "day", "week", "month"]}, 400)
+            return
+        since, until = self._window(parsed, default_hours=168)
+        etype = (q.get("type") or [None])[0]
+        value = (q.get("value") or [None])[0]
+        rows = get_store().investigations.timeline(
+            since, until, bucket,
+            etype if etype and value else None,
+            value if etype and value else None,
+        )
+        self.send_json({"bucket": bucket, "since": since, "until": until,
+                        "count": len(rows), "buckets": rows})
+
+    def host_summary_api(self, parsed):
+        since, _ = self._window(parsed)
+        rows = get_store().investigations.host_summary(since)
+        self.send_json({"count": len(rows), "hosts": rows})
+
+    def rule_breakdown_api(self, parsed):
+        since, _ = self._window(parsed)
+        rows = get_store().investigations.rule_breakdown(since)
+        self.send_json({"count": len(rows), "rules": rows,
+                        "unmapped": sum(1 for r in rows if r["unmapped"])})
+
+    def stale_endpoints_api(self, parsed):
+        q = parse_qs(parsed.query)
+        try:
+            days = int((q.get("days") or ["7"])[0])
+        except (TypeError, ValueError):
+            days = 7
+        days = max(1, min(days, 365))
+        rows = get_store().investigations.stale_endpoints(days)
+        self.send_json({"days": days, "count": len(rows), "endpoints": rows})
+
+    def attack_techniques_api(self, parsed):
+        """Techniques actually observed in this environment, with ATT&CK metadata."""
+        since, _ = self._window(parsed, default_hours=168)
+        rows = get_store().investigations.technique_breakdown(since)
+        self.send_json({"count": len(rows), "techniques": rows})
+
+    def attack_technique_api(self, parsed):
+        """One technique: its metadata plus the hosts that produced it."""
+        q = parse_qs(parsed.query)
+        tid = (q.get("id") or [""])[0].strip().upper()
+        if not tid:
+            self.send_json({"error": "'id' is required"}, 400)
+            return
+        meta = attack.get(tid)
+        if not meta:
+            self.send_json({"error": f"unknown technique {tid!r}",
+                            "hint": "GET /api/attack/catalog lists known techniques"},
+                           404)
+            return
+        since, _ = self._window(parsed, default_hours=168)
+        inv = get_store().investigations
+        hosts = inv.technique_hosts(tid, since)
+        self.send_json({"technique": meta.as_dict(), "host_count": len(hosts),
+                        "hosts": hosts})
+
+    def attack_catalog(self):
+        """The curated technique catalog, plus rules that have no mapping yet."""
+        from tiox.schemas.attack import unmapped_rules
+
+        rows = get_store().investigations.rule_breakdown()
+        known = [r["rule_id"] for r in rows if r["rule_id"]]
+        self.send_json({
+            "techniques": attack.catalog(),
+            "tactics": attack.tactics(),
+            "observed_rules": sorted(set(known)),
+            "unmapped_rules": unmapped_rules(sorted(set(known))),
+        })
 
 
 def request_shutdown():
