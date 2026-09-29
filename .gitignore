@@ -7,17 +7,28 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Sensitive data - DO NOT COMMIT
-.agent_key
+# TLS material - generated locally, never committed
+certs/
 *.key
 *.pem
+.agent_key
 *.secret
 
-# Runtime data (regenerate on deploy)
-incidents.json
+# Local data: threat intel, IOC lists, and anything else that changes per
+# deployment or that you would rather not publish. The platform code that
+# *consumes* these is tracked; the data itself is not.
+data/
+*.csv
+
+# Runtime state (regenerated)
+*.db
+*.db-wal
+*.db-shm
 inventory.json
+incidents.json
 logs/
 reports/
+ioc_databases/
 
 # OS files
 .DS_Store
@@ -33,12 +44,3 @@ Thumbs.db
 *.tmp
 *.bak
 *~
-certs/
-.agent_key
-*.db
-*.db-wal
-*.db-shm
-inventory.json
-incidents.json
-reports/
-logs/

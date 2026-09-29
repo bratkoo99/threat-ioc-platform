@@ -260,39 +260,66 @@ curl http://localhost:8443/api/status
 ```
 threat-ioc-platform/
 ├── threat_platform.sh      # CLI menu interface
-├── web_ui_server.py        # Python HTTP/SSE server
+├── web_ui_server.py        # Python HTTP/SSE server (TLS + auth)
 ├── ioc_scanner.c           # C IOC scanner source
 ├── ioc_scanner             # Compiled scanner binary
 ├── Makefile                # Build configuration
 ├── index.html              # Dashboard HTML
 ├── style.css               # EDR-style CSS theme
 ├── app.js                  # Frontend JavaScript
-├── ioc_databases/          # IOC database files
-├── logs/                   # Platform logs
-├── reports/                # Scan reports
-├── incidents.json          # Incident records
-├── inventory.json          # Endpoint inventory
-├── IOC-C2-Known_servers    # Known C2 server indicators
-└── README.md               # This file
+├── ARCHITECTURE.md         # Platform design decisions
+├── tiox/                   # Platform package (schema, connectors, store)
+├── tests/                  # Unit + integration + e2e tests
+├── data/                   # LOCAL threat intel (gitignored)
+├── ioc_databases/          # IOC database files (gitignored)
+├── logs/                   # Platform logs (gitignored)
+├── reports/                # Scan reports (gitignored)
+├── incidents.json          # Incident records (gitignored, legacy)
+└── inventory.json          # Endpoint inventory (gitignored, legacy)
 ```
+
+## Threat Intel Data Is Not In Git
+
+Your indicator set is a **data file, not source**, and it is deliberately
+untracked. This repo is public, so a committed IOC list would publish your
+indicators — and feeds change constantly, which would mean a commit per refresh.
+
+```bash
+make ioc            # creates data/IOC-C2-Known_servers.local
+```
+
+The file it creates is gitignored along with everything else in `data/`. The CLI's
+research viewer (`threat_platform.sh`) reads it from there. Point it elsewhere with
+`TIOX_RESEARCH_FILE=/path/to/your/file`.
+
+Populate it from public sources — CISA AIS, abuse.ch, MISP — or your own hunting
+notes. Nothing in the scanner depends on it: the scanner's built-in hash and
+pattern databases are compiled in, and external feeds are loaded at runtime with
+`./ioc_scanner -H hashes.csv -P patterns.csv /path`.
 
 ## Security
 
 ### Implemented Protections
 
+- **TLS by default** — port 8443 is genuinely encrypted, not just conventionally so. Startup fails loudly if the certificate is missing instead of silently serving cleartext. Disable only for a loopback dev session with `TIOX_TLS=0`.
+- **Two-credential auth** — an agent key scoped to `/api/agent/*`, and a session key for everything else, so a compromised endpoint cannot read the dashboard or mutate incidents. Compared in constant time.
+- **Protected by default** — the auth gate runs in the request handler, so a newly added endpoint is covered automatically rather than by remembering to guard it.
+- **Session cookie** — `HttpOnly; SameSite=Strict`, with `Secure` added automatically over TLS. The dashboard exchanges the session key for the cookie because `EventSource` cannot set headers.
+- **Binds loopback by default** — `127.0.0.1`, not `0.0.0.0`. Set `TIOX_BIND` to expose it deliberately.
 - **Path Traversal Prevention** — All file paths are validated and resolved to absolute paths
 - **XSS Mitigation** — Input sanitization and Content Security Policy headers
 - **Request Size Limiting** — 1MB maximum request body size
 - **Security Headers** — X-Frame-Options, X-Content-Type-Options, X-XSS-Protection, Referrer-Policy
 - **Input Validation** — All API inputs are validated and sanitized
+- **Key material never committed** — `.agent_key` and `certs/` are gitignored; the key file is created mode 0600
 
 ### Best Practices
 
-- Run the web server on a dedicated port (default: 8443)
-- Use HTTPS in production (reverse proxy recommended)
+- Generate a certificate before first run: `make cert`
+- The session key is printed at startup and **not persisted**; set `TIOX_SESSION_KEY` to pin it
+- Restrict `TIOX_BIND` exposure at the firewall, not just in the app
 - Regularly update IOC databases
 - Review and tune detection rules to minimize false positives
-- Restrict API access to authorized networks
 
 ### Production Deployment
 

@@ -14,7 +14,9 @@ SCANNER_BIN="$PLATFORM_DIR/ioc_scanner"
 IOC_DB_DIR="$PLATFORM_DIR/ioc_databases"
 REPORT_DIR="$PLATFORM_DIR/reports"
 LOG_DIR="$PLATFORM_DIR/logs"
-RESEARCH_FILE="$PLATFORM_DIR/IOC-C2-Known_servers"
+# IOC research document. Kept OUT of git on purpose: it is a working data file,
+# not source. Overridable with TIOX_RESEARCH_FILE.
+RESEARCH_FILE="${TIOX_RESEARCH_FILE:-$PLATFORM_DIR/data/IOC-C2-Known_servers.local}"
 MAKEFILE="$PLATFORM_DIR/Makefile"
 TIMESTAMP="$(date '+%Y-%m-%d_%H-%M-%S')"
 
