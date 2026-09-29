@@ -165,23 +165,37 @@ class DetectionEngine:
             made.append(build_threat_event(event, hit, techniques))
         return made, hits
 
-    def record_outcome(self, hits: list[dict[str, Any]], *, opened: int = 0) -> None:
+    def record_outcome(
+        self,
+        hits: list[dict[str, Any]],
+        *,
+        opened: int = 0,
+        opened_by_rule: dict[str, int] | None = None,
+    ) -> None:
         """
         Persist per-rule counters for the tuning view.
 
-        Called after the caller knows how many incidents were actually opened, so
-        `incidents_opened` stays honest. A rule that fired a hundred times and
-        opened two incidents must not read as a hundred alerts.
+        `opened_by_rule` is how many incidents *each* rule actually opened. The
+        older single `opened` total is not usable for this: with two rules firing
+        on one event and one incident opened, attributing that incident to both
+        rules would report a log-mode rule as having opened an incident, which is
+        exactly the behaviour per-rule mode exists to prevent. The `opened`
+        argument is kept for callers that genuinely have one rule in play.
         """
         by_rule: dict[str, int] = {}
         for hit in hits:
             by_rule[hit["rule_id"]] = by_rule.get(hit["rule_id"], 0) + 1
+
         for rule_id, count in by_rule.items():
             bare = _bare_rule_id(rule_id)
+            if opened_by_rule is not None:
+                opened_count = opened_by_rule.get(rule_id, 0)
+            else:
+                opened_count = opened if len(by_rule) == 1 else 0
             try:
                 self.store.record_rule_run(bare, count)
-                if opened:
-                    self.store.record_rule_incidents(bare, opened)
+                if opened_count:
+                    self.store.record_rule_incidents(bare, opened_count)
             except Exception:  # pragma: no cover -- counters are not load-bearing
                 log.exception("could not record outcome for rule %s", rule_id)
 

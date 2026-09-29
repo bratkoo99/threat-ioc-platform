@@ -30,8 +30,10 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from tiox.store.control import ControlPlane
+from tiox.correlation import Correlator
 from tiox.store.pipeline import (
     IngestResult,
+    get_detection_engine,
     ingest,
     invalidate_detection,
     migrate_legacy,
@@ -388,6 +390,54 @@ def add_incident(incident, event_id=None):
     return created
 
 
+def _correlate(result, store):
+    """
+    Turn alert-mode detections into incidents.
+
+    Deliberately not inside the pipeline. Event storage and incident creation have
+    different failure semantics -- an event that fails to store is retryable, an
+    incident that fails to open is not -- so separating them means a correlation
+    bug can cost a detection but never the data that produced it.
+
+    Returns a summary; never raises.
+    """
+    summary: dict[str, Any] = {
+        "opened": 0, "joined": 0, "suppressed": 0, "none": 0,
+        # Which rule opened which incident. A single total is not enough: with two
+        # rules firing on one event, attributing the incident to both would make a
+        # log-mode rule look like it paged someone, which is precisely what per-rule
+        # mode exists to prevent.
+        "opened_by_rule": {},
+    }
+    if not result.detections:
+        return summary
+    try:
+        from tiox.detection import event_to_dict
+
+        correlator = Correlator(store)
+        by_detection: dict[str, list] = {}
+        for hit in result.detections:
+            # Pair by rule_id: each detection event carries exactly one rule id.
+            if hit.get("rule_id"):
+                by_detection.setdefault(hit["rule_id"], []).append(hit)
+
+        for ev in result.detection_events:
+            hits = by_detection.get(ev.rule_id) or []
+            if not hits:
+                continue
+            outcome = correlator.correlate(event_to_dict(ev), hits)
+            action = outcome.get("action", "none")
+            if action in summary and isinstance(summary[action], int):
+                summary[action] += 1
+            if action == "opened":
+                per = summary["opened_by_rule"]
+                for h in hits:
+                    per[h["rule_id"]] = per.get(h["rule_id"], 0) + 1
+    except Exception:
+        log.exception("correlation failed; detections are still stored")
+    return summary
+
+
 def ingest_event(payload, source, context=None, kind=None):
     """Normalize a native payload into canonical events and persist them.
 
@@ -401,7 +451,26 @@ def ingest_event(payload, source, context=None, kind=None):
         failed = IngestResult()
         failed.errors.append(f"no connector for source {source!r}: {exc}")
         return failed
-    result = ingest(get_store(), payload, source, context, connector=conn)
+    store = get_store()
+    result = ingest(store, payload, source, context, connector=conn)
+    if result.detections:
+        summary = _correlate(result, store)
+        log.info(
+            "ingest %s: %d detection(s) -> %d incident(s) opened, %d joined",
+            source, len(result.detections), summary.get("opened", 0),
+            summary.get("joined", 0),
+        )
+        # Rule counters are only honest once correlation has decided how many
+        # incidents were really opened, and which rule opened each one, so they
+        # are written here rather than in the pipeline.
+        try:
+            engine = get_detection_engine(store)
+            engine.record_outcome(
+                result.detections,
+                opened_by_rule=summary.get("opened_by_rule") or {},
+            )
+        except Exception:
+            log.exception("could not record rule outcomes")
     if result.errors:
         log.warning("ingest %s: %d error(s): %s", source, len(result.errors), result.errors)
     else:
@@ -804,6 +873,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.list_rules_api(parsed)
         elif parsed.path == "/api/rules/schema":
             self.rules_schema_api()
+        elif parsed.path == "/api/rules/effectiveness":
+            self.rule_effectiveness_api(parsed)
+        elif parsed.path == "/api/rules/suppressions":
+            self.list_suppressions_api()
         elif parsed.path == "/api/reports/kinds":
             self.report_kinds_api()
         elif parsed.path == "/api/reports/generate":
@@ -1021,6 +1094,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.create_rule_api(self.read_body())
         elif parsed.path == "/api/rules/test":
             self.test_rule_api(self.read_body())
+        elif parsed.path == "/api/rules/suppress":
+            self.suppress_rule_api(self.read_body())
         elif parsed.path == "/api/reports/generate":
             self.report_generate_api(parsed)
         elif parsed.path == "/api/incidents/create":
@@ -1356,6 +1431,70 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.delete_rule_api(parsed)
         else:
             self.send_error(404)
+
+    def rule_effectiveness_api(self, parsed):
+        """
+        The tuning view's data: hits, incidents, false positives, and a grade.
+
+        Advisory only. Nothing in this response disables anything, and the UI
+        shows it that way -- a detection that disappears without explanation is
+        the failure mode Phase 2 exists to prevent.
+        """
+        q = parse_qs(parsed.query)
+        hours = 24 * 7
+        if q.get("window", [""])[0] in ("24h", "7d", "30d", "all"):
+            hours = {"24h": 24, "7d": 168, "30d": 720, "all": 24 * 365}[
+                q.get("window", ["7d"])[0]]
+        since = _hours_ago(hours)
+        store = get_store()
+        self.send_json({
+            "rules": store.rule_effectiveness(since),
+            "suppressions": store.list_suppressions(),
+            "window": q.get("window", ["7d"])[0],
+        })
+
+    def list_suppressions_api(self):
+        self.send_json({"suppressions": get_store().list_suppressions()})
+
+    def suppress_rule_api(self, body):
+        """
+        Mute a rule for a period.
+
+        Time-boxed, and the response states when the mute expires: an analyst who
+        cannot see the end of a mute has no reason to trust that it ends.
+        """
+        if body is None:
+            self.send_json({"error": "Request too large"}, 413)
+            return
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self.send_json({"error": "Invalid JSON"}, 400)
+            return
+        rule_id = str(data.get("rule_id") or "").strip()
+        store = get_store()
+        if not rule_id or not store.get_rule(rule_id):
+            self.send_json({"error": f"no such rule: {rule_id!r}"}, 404)
+            return
+        minutes = data.get("minutes", 1440)
+        try:
+            minutes = max(1, min(60 * 24 * 30, int(minutes)))
+        except (TypeError, ValueError):
+            minutes = 1440
+
+        if data.get("action") == "unsuppress":
+            store.unsuppress_rule(rule_id)
+            self.send_json({"ok": True, "rule_id": rule_id, "suppressed": False})
+            return
+
+        if data.get("false_positive"):
+            store.record_rule_false_positive(rule_id)
+        store.suppress_rule(rule_id, minutes, data.get("reason"))
+        until = (datetime.now() + timedelta(minutes=minutes)).isoformat()
+        self.send_json({
+            "ok": True, "rule_id": rule_id, "suppressed": True,
+            "suppressed_until": until, "minutes": minutes,
+        })
 
     def read_body(self):
         length = int(self.headers.get("Content-Length", 0))

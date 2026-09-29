@@ -35,7 +35,7 @@ def read(name):
 # view (or vice versa) is a test failure, not a dead click.
 EXPECTED_VIEWS = {
     "dashboard", "events", "endpoints", "incidents", "attack",
-    "rules", "scans", "scanner", "agents", "databases", "reports", "entity",
+    "rules", "tuning", "scans", "scanner", "agents", "databases", "reports", "entity",
 }
 
 

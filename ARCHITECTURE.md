@@ -269,6 +269,29 @@ acted on" and decides.
 - **No ML scoring.** A confidence score nobody can explain is not a detection
   engine; it is a ranking that hides its own reasoning.
 
+### Where Phase 2 landed
+
+`detection.py` (rules in the ingest path), `correlation.py` (one incident per
+group, not per event), and `tiox/store/control.py`'s `rule_effectiveness` /
+suppression methods are in. The Tuning view (`ui/view-tuning.js`) is the
+feedback loop: per-rule hits, incidents, and analyst rejections, worst-first.
+
+Two invariants are load-bearing and worth stating, because both were violated
+once and both failed silently:
+
+- **An incident is attributed to the rule that opened it.** Not to every rule
+  that fired on the same event. With two rules matching one event and one
+  incident opened, crediting both reported a `log` rule as having paged someone.
+- **The correlation window is tested on `updated`, never `created OR updated`.**
+  Every join bumps `updated`, so the `OR` form made an incident joinable
+  forever -- a campaign from last month absorbed today's hits and the window did
+  nothing.
+
+Two more classes of failure the tests now pin, both of which present as silence
+rather than an error: a rule whose tree stops validating (schema drift) is
+dropped with a log line rather than evaluated into nonsense, and a rule that
+raises mid-evaluation is skipped while the observation is still stored.
+
 ## Known deliberate limitations
 
 - The agent sends naive local timestamps. The connector treats them as UTC and

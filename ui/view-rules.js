@@ -178,6 +178,21 @@
         </select>
       </div>
       <div class="field-row">
+        <label class="field-label" for="r-mode">On a hit</label>
+        <select class="field" id="r-mode">
+          <option value="log"${(!r || r.mode === 'log') ? ' selected' : ''}>
+            log only — record the event, open no incident</option>
+          <option value="alert"${(r && r.mode === 'alert') ? ' selected' : ''}>
+            alert — record the event and open an incident</option>
+        </select>
+      </div>
+      <div class="banner info" style="font-size:12px;margin-bottom:10px">
+        <strong>log</strong> is the default. A rule that should have alerted and
+        did not is a missed detection and you would never see it; a rule that
+        should not have and did is noise you can see and fix. Start in log, and
+        promote to alert once the rule has proved it is worth someone's attention.
+      </div>
+      <div class="field-row">
         <label class="field-label" for="r-tech">ATT&amp;CK techniques</label>
         <input class="field" id="r-tech"
                value="${TIOX.esc(r ? (r.techniques || []).join(', ') : '')}"
@@ -430,6 +445,7 @@
       name: name || 'untitled rule',
       description: desc,
       severity: sev,
+      mode: this.host.querySelector('#r-mode').value,
       techniques: techs,
       tree: this.tree,
       enabled: this.rule ? this.rule.enabled : true,

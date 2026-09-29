@@ -174,14 +174,14 @@ def ingest(
                 log.exception("failed to store detection %s", det.event_id)
                 result.errors.append(f"store detection: {exc}")
 
-    # Counters are written once per payload, not once per event, so the tuning
-    # view reflects this batch rather than every intermediate state.
-    if result.detections:
-        try:
-            engine.record_outcome(result.detections)
-        except Exception:  # pragma: no cover -- counters are not load-bearing
-            log.exception("could not record rule outcomes")
-
+    # Per-rule counters are NOT written here. A rule's `incidents_opened` can
+    # only be known after correlation has decided how many incidents an alert-mode
+    # rule actually opened, and that happens in the server layer. Writing hits here
+    # as well double-counted every rule the moment the server did its own write.
+    #
+    # A caller that never correlates (tests, bulk migration) can call
+    # DetectionEngine.record_outcome() itself; that is the honest default,
+    # because an uncorrelated hit has opened no incidents.
     return result
 
 

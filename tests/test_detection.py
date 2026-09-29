@@ -406,11 +406,61 @@ class TestPerRuleMode(DetectionTestCase):
 
 class TestRuleCounters(DetectionTestCase):
     def test_hits_are_counted_per_rule(self):
+        """
+        Counters are written by whoever correlates, not by the pipeline.
+
+        A rule's `incidents_opened` is only knowable after correlation decides
+        how many incidents an alert-mode rule opened, so the pipeline must not
+        write counters itself -- doing both double-counts every rule.
+        """
         self.save(lolbin_rule())
+        from tiox.store.pipeline import get_detection_engine
+
+        engine = get_detection_engine(self.store)
+        hits = []
         for i in range(3):
-            self.feed(proc="rundll32.exe", path=fr"C:\Temp\{i}.dll", host="w1")
-        stats = {r["name"]: r for r in self.store.rule_effectiveness()}
-        self.assertEqual(stats["Temp LOLBin"]["hits"], 3)
+            res = self.feed(proc="rundll32.exe", path=fr"C:\Temp\{i}.dll",
+                            host="w1")
+            hits.extend(res.detections)
+        self.assertEqual(len(hits), 3)
+
+        # The pipeline alone records nothing.
+        self.assertEqual(self.store.rule_effectiveness()[0]["hits"], 0,
+                         "the pipeline wrote counters it cannot attribute")
+
+        engine.record_outcome(hits, opened=1)
+        row = self.store.rule_effectiveness()[0]
+        self.assertEqual(row["hits"], 3)
+        self.assertEqual(row["incidents"], 1)
+
+    def test_an_incident_is_attributed_only_to_the_rule_that_opened_it(self):
+        """
+        Two rules fire on one event; one incident opens. Attributing that incident
+        to both would report the log-mode rule as having paged someone, which is
+        exactly what per-rule mode exists to prevent.
+        """
+        from tiox.store.pipeline import get_detection_engine
+
+        self.save(lolbin_rule("AlertRule", mode="alert", tree={
+            "kind": "match", "field": "process", "op": "equals",
+            "value": "rundll32.exe"}))
+        self.save(lolbin_rule("LogRule", mode="log", tree={
+            "kind": "match", "field": "type", "op": "equals",
+            "value": "process"}))
+        res = self.feed(proc="rundll32.exe", path=fr"C:\Temp\x.dll", host="w1")
+        self.assertEqual(len(res.detections), 2)
+
+        engine = get_detection_engine(self.store)
+        alert_id = next(h["rule_id"] for h in res.detections
+                        if h["name"] == "AlertRule")
+        engine.record_outcome(
+            res.detections, opened_by_rule={alert_id: 1})
+
+        by_name = {r["name"]: r for r in self.store.rule_effectiveness()}
+        self.assertEqual(by_name["AlertRule"]["incidents"], 1)
+        self.assertEqual(
+            by_name["LogRule"]["incidents"], 0,
+            "a log-mode rule was credited with opening an incident")
 
     def test_a_rule_that_never_fired_is_untested_not_bad(self):
         """

@@ -683,20 +683,25 @@ class ControlPlane:
         self, key: str, since: str
     ) -> dict[str, Any] | None:
         """
-        An open incident with this key, created at or after `since`.
+        An open incident with this key, touched at or after `since`.
 
         Only `open` and `investigating` match. A resolved incident that reopens on
         the next hit loses the resolution history and the effort spent on the
         first occurrence, which is worse than a duplicate.
+
+        Tested on `updated` alone, deliberately. The previous `created >= ? OR
+        updated >= ?` meant an incident stayed joinable forever, because every
+        join bumps `updated` -- so a campaign from last month absorbed today's
+        hits and the window did nothing at all.
         """
         with self._lock:
             row = self._conn.execute(
                 """SELECT * FROM incidents
                     WHERE correlation_key = ?
                       AND status IN ('open', 'investigating')
-                      AND (created >= ? OR updated >= ?)
-                    ORDER BY created DESC LIMIT 1""",
-                (key, since, since),
+                      AND updated >= ?
+                    ORDER BY updated DESC LIMIT 1""",
+                (key, since),
             ).fetchone()
         return _incident_row(row) if row else None
 
@@ -748,7 +753,13 @@ class ControlPlane:
         current = self.get_incident(incident_id)
         if not current:
             return False
-        if not severity_at_least(severity, current.get("severity", "medium")):
+        current_sev = current.get("severity", "medium")
+        # Strictly greater, not "at least". severity_at_least is >=, so an
+        # incident whose severity already matches reported a promotion on every
+        # join, and the caller logged a severity change that never happened.
+        if str(severity) == str(current_sev):
+            return False
+        if not severity_at_least(severity, current_sev):
             return False
         with self._tx() as c:
             c.execute(
