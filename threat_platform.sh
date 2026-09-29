@@ -362,7 +362,7 @@ manage_databases() {
         else
             local i=1
             for f in "$IOC_DB_DIR"/*; do
-                [ -f "$f" ] && echo -e "  ${GREEN}$i${NC) $(basename "$f") ($(wc -c < "$f") bytes)"
+                [ -f "$f" ] && echo -e "  ${GREEN}$i${NC} $(basename "$f") ($(wc -c < "$f") bytes)"
                 i=$((i+1))
             done
         fi
@@ -512,7 +512,7 @@ view_reports() {
     
     local i=1
     for f in "$REPORT_DIR"/*; do
-        [ -f "$f" ] && echo -e "  ${GREEN}$i${NC) $(basename "$f") ($(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null) bytes)"
+        [ -f "$f" ] && echo -e "  ${GREEN}$i${NC} $(basename "$f") ($(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null) bytes)"
         i=$((i+1))
     done
     

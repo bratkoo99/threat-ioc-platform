@@ -3,12 +3,16 @@
 #
 # Targets:
 #   all       build the scanner
+#   install   install the scanner to /usr/local/bin
+#   uninstall remove the installed scanner
 #   test      unit + e2e tests for the Python platform layer (needs the scanner)
 #   check     alias for test
 #   selftest  scanner smoke test only
 #   schema    regenerate the canonical event JSON Schema
 #   ioc       create the local (untracked) threat-intel data file
+#   cert      generate a self-signed TLS cert for the dashboard
 #   serve     run the dashboard (TLS on by default)
+#   lint      syntax-check the shell script and the Python package
 #   clean     remove build artifacts
 #
 # The scanner exits 0 (clean), 2 (threats found), 1 (usage/IO error). Anything
@@ -22,7 +26,7 @@ TARGET = ioc_scanner
 SRC = ioc_scanner.c
 PYTHON ?= python3
 
-.PHONY: all clean install uninstall test check selftest schema ioc serve
+.PHONY: all clean install uninstall test check selftest schema ioc serve cert lint
 
 all: $(TARGET)
 
@@ -75,9 +79,22 @@ ioc:
 
 # Full platform test suite: unit tests plus the end-to-end run against the real
 # scanner binary. Both must pass.
-test check: $(TARGET)
+test check: $(TARGET) lint
 	$(PYTHON) -m unittest discover -s tests -v
 	$(PYTHON) tests/e2e_scanner.py
+
+# Cheap syntax gates. threat_platform.sh sat broken (`${NC)` instead of `${NC}`,
+# which swallowed the rest of the line and unbalanced the quotes) across all
+# three original commits, because nothing ever parsed it. Keep it that way fixed.
+lint:
+	@bash -n threat_platform.sh && echo "lint: threat_platform.sh OK"
+	@$(PYTHON) -m compileall -q tiox web_ui_server.py >/dev/null && \
+		echo "lint: python OK"
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck -S error threat_platform.sh && echo "lint: shellcheck OK"; \
+	else \
+		echo "lint: shellcheck not installed, skipped"; \
+	fi
 
 # Scanner-only smoke test: confirms a known-bad filename fires and that the
 # documented non-zero exit code actually propagates.
