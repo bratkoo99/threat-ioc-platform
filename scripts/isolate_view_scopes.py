@@ -13,7 +13,10 @@ import re
 import sys
 from pathlib import Path
 
-UI = Path("/home/filip/Desktop/codeBase_AV/threat-ioc-platform/ui")
+# Relative to the repository, not an absolute path: the hardcoded version only
+# worked on the machine it was written on.
+REPO = Path(__file__).resolve().parents[1]
+UI = REPO / "ui"
 
 WRAP_OPEN = "/* Own scope: helpers here must not collide with another view's. */\n(function () {\n"
 WRAP_CLOSE = "})();\n"
@@ -47,9 +50,29 @@ def leading_comment(src: str) -> str:
     return "\n".join(lines[:i]).rstrip()
 
 
+def already_wrapped(src: str) -> bool:
+    """
+    Whether this file is already inside an IIFE.
+
+    The previous check was `"<marker>" in src.split("\n\n")[0] or
+    src.lstrip().startswith("(function")`. It missed the files whose comment
+    block is followed by a blank line and the wrapper further down, so a re-run
+    wrapped them a second time: nine files ended up with nested IIFEs and the
+    helper names were shadowed again -- reintroducing the exact bug the script
+    exists to prevent, while appearing to succeed.
+
+    A file is considered wrapped if it contains the marker this script writes, or
+    any top-level `(function` opening. Matching our own marker is what makes a
+    re-run safe; matching the pattern at all covers files scoped by hand.
+    """
+    if WRAP_OPEN.strip()[:30] in src:
+        return True
+    return bool(re.search(r"^\(function", src, re.M))
+
+
 def wrap(path: Path) -> bool:
     src = path.read_text()
-    if "(function ()" in src.split("\n\n")[0] or src.lstrip().startswith("(function"):
+    if already_wrapped(src):
         return False
     head = leading_comment(src)
     body = src[len(head):].strip("\n")
