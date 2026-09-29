@@ -79,8 +79,10 @@ def describe_all() -> list[dict[str, Any]]:
 
 def _register_builtins() -> None:
     from tiox.connectors.agent import AgentConnector
+    from tiox.connectors.system import SystemConnector
 
     register(AgentConnector())
+    register(SystemConnector())
 
 
 _register_builtins()

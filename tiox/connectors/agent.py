@@ -126,24 +126,35 @@ class AgentConnector(Connector):
     # ---------- individual shapes ----------
 
     def _registration(self, payload: dict[str, Any]) -> list[Event]:
+        """
+        Endpoint registration.
+
+        The time is the registration event, not an observation of anything, so
+        the source supplies no `ts` and we mark it derived. Without that marker a
+        re-registration got a fresh `now()` and a new fingerprint, so the lake
+        filled with duplicate "this host exists" records -- four registrations of
+        one host produced four events plus four registration incidents.
+        """
         hostname = (payload.get("hostname") or "unknown").strip()
         ip = (payload.get("ip") or "").strip()
-        return [
-            self._event(
-                type=EventType.AGENT_STATUS.value,
-                severity=Severity.INFO.value,
-                host=hostname,
-                entities=merge_entities(
-                    host_entities(hostname, ip or None),
-                    {"host": [hostname]},
-                ),
-                title=f"Agent registered: {hostname}",
-                description=f"Endpoint {hostname} ({ip or 'no ip'}) registered",
-                rule_id="agent.register",
-                raw=dict(payload),
-                tags=["agent", "registration"],
-            )
-        ]
+        _, _, derived = parse_agent_ts(payload.get("ts"))
+        ev = self._event(
+            type=EventType.AGENT_STATUS.value,
+            severity=Severity.INFO.value,
+            host=hostname,
+            entities=merge_entities(
+                host_entities(hostname, ip or None),
+                {"host": [hostname]},
+            ),
+            title=f"Agent registered: {hostname}",
+            description=f"Endpoint {hostname} ({ip or 'no ip'}) registered",
+            rule_id="agent.register",
+            raw=dict(payload),
+            tags=["agent", "registration"],
+        )
+        if derived:
+            ev.raw["_ts_derived"] = True
+        return [ev]
 
     def _heartbeat(self, payload: dict[str, Any], context: dict[str, Any]) -> list[Event]:
         agent_id = payload.get("agent_id")

@@ -217,42 +217,97 @@ curl -X POST http://localhost:8443/api/incidents/create \
 
 ## API Reference
 
+All `/api/*` routes except `/api/status` and `/` require a credential. Use the
+session key for everything, or the agent key for `/api/agent/*` only:
+
+```bash
+curl -H "Authorization: Bearer $SESSION_KEY" https://localhost:8443/api/stats
+```
+
 ### Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/status` | Platform status |
-| GET | `/api/stats` | Scan statistics |
-| GET | `/api/inventory` | Endpoint inventory |
-| GET | `/api/incidents` | All incidents |
-| GET | `/api/incidents/recent` | Recent incidents |
-| GET | `/api/events` | SSE event stream |
-| POST | `/api/scan/start` | Start a scan |
-| POST | `/api/scan/stop` | Stop current scan |
-| POST | `/api/scan/reset` | Reset scan state |
-| POST | `/api/agent/register` | Register endpoint |
-| POST | `/api/incidents/create` | Create incident |
-| POST | `/api/incidents/update` | Update incident |
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/api/status` | public | Platform status |
+| POST | `/api/login` | public | Exchange session key for a cookie |
+| GET | `/api/logout` | session | Clear the session cookie |
+| GET | `/api/stats` | session | Scan + event-lake statistics |
+| GET | `/api/inventory` | session | Endpoint inventory |
+| GET | `/api/incidents` | session | All incidents (with notes) |
+| GET | `/api/incidents/recent` | session | Recent incidents |
+| GET | `/api/events` | session | **SSE** progress stream (not a query) |
+| GET | `/api/lake` | session | Paginated event query, filterable |
+| GET | `/api/entity` | session | **The pivot**: all events for one entity |
+| GET | `/api/databases` | session | IOC database files |
+| GET | `/api/reports` | session | Saved scan reports |
+| GET | `/api/agent/script` | session | Download the agent script |
+| GET | `/api/agent/key` | session | Reveal the agent key |
+| POST | `/api/scan/start` | session | Start a scan |
+| POST | `/api/scan/stop` | session | Stop current scan |
+| POST | `/api/scan/reset` | session | Reset scan state |
+| POST | `/api/agent/register` | agent | Register endpoint |
+| POST | `/api/agent/heartbeat` | agent | Endpoint heartbeat |
+| POST | `/api/agent/scan` | agent | Request a scan |
+| POST | `/api/incidents/create` | session | Create incident |
+| POST | `/api/incidents/update` | session | Update incident status / add note |
+
+`/api/events` is the live SSE stream and holds the connection open. The
+paginated event query is `/api/lake` — a separate path, because one URL cannot
+mean both an endless stream and a paged result set.
+
+### The pivot
+
+`GET /api/entity?type=<entity_type>&value=<value>` returns every event ever
+recorded for that value, across all sources, with first/last seen, the hosts
+involved, and the contributing sources. This is the query the whole canonical
+schema exists to make possible: an analyst sees a hash once and immediately
+knows where else it has been.
+
+```bash
+# Everything ever seen for one file hash
+curl -H "Authorization: Bearer $SESSION_KEY" \
+  "https://localhost:8443/api/entity?type=file_hash&value=275a021bbfb6489e..."
+
+# Everything on one host, in a time window
+curl -H "Authorization: Bearer $SESSION_KEY" \
+  "https://localhost:8443/api/entity?type=host&value=web-server-01"
+```
+
+Valid `type` values: `file_hash`, `file_path`, `file_name`, `ip`, `domain`,
+`url`, `process`, `registry_key`, `user`, `host`, `mutex`, `scheduled_task`,
+`cert`, `email`. An unknown type returns 400 with the valid list.
+
+### Querying the lake
+
+`GET /api/lake` supports `type`, `severity`, `host`, `source`, `since`, `until`
+(ISO-8601) and `limit` (capped at 1000):
+
+```bash
+curl -H "Authorization: Bearer $SESSION_KEY" \
+  "https://localhost:8443/api/lake?type=threat_hit&severity=critical&limit=50"
+```
 
 ### Example Requests
 
 **Start a scan:**
 ```bash
-curl -X POST http://localhost:8443/api/scan/start \
+curl -X POST https://localhost:8443/api/scan/start \
+  -H "Authorization: Bearer $SESSION_KEY" \
   -H "Content-Type: application/json" \
   -d '{"path":"/home","mode":"full"}'
 ```
 
 **Register an agent:**
 ```bash
-curl -X POST http://localhost:8443/api/agent/register \
+curl -X POST https://localhost:8443/api/agent/register \
+  -H "Authorization: Bearer $AGENT_KEY" \
   -H "Content-Type: application/json" \
   -d '{"hostname":"web-server-01","ip":"10.0.0.5","os":"Ubuntu 22.04","version":"1.0"}'
 ```
 
 **Get platform status:**
 ```bash
-curl http://localhost:8443/api/status
+curl https://localhost:8443/api/status
 ```
 
 ## Project Structure

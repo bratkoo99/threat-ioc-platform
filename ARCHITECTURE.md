@@ -158,9 +158,15 @@ downgrade. `TIOX_BIND` defaults to `127.0.0.1` rather than `0.0.0.0`.
   records `raw._ts_assumed_utc` so the assumption stays auditable. Phase 0 does
   not change the agent's wire format, because that would require redeploying
   every agent.
-- `incidents.json` and `inventory.json` are still what the legacy web server
-  reads. `tiox.control.migrate` replays them into the control plane
-  (idempotently); wiring the live server to the new store is Phase 0.6.
+- Phase 0.6 is done: the web server reads and writes the control plane, and
+  every agent observation is ingested into the lake. `incidents.json` and
+  `inventory.json` are now read once at startup to seed a fresh database and
+  then left untouched as a rollback path. Set `TIOX_MIGRATE_LEGACY=0` to skip
+  the import.
+- Two read APIs exist for the lake: `GET /api/lake` (paginated, filterable) and
+  `GET /api/entity?type=&value=` (the pivot). Neither is wired into the
+  dashboard UI yet -- the frontend still renders the endpoint/incident views
+  only. That is the remaining part of Phase 1's workbench.
 - SQLite is not the lake. It is here so Phase 0 is testable end to end.
 - Detection is still exact SHA-256 plus filename patterns. Imphash, fuzzy
   hashing, YARA, and entropy are Phase 4, and they are cheap to add later

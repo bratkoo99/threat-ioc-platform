@@ -208,6 +208,13 @@ class ControlPlane:
     # ================= endpoints =================
 
     def upsert_endpoint(self, ep: dict[str, Any]) -> str:
+        """
+        Insert or refresh an endpoint, keyed on (hostname, ip).
+
+        Returns the server-issued id, which may differ from ep["id"]: the legacy
+        migration passes historical ids in, but a new registration gets a
+        fresh EP-xxxx so two agents can never collide on a client-chosen one.
+        """
         now = iso()
         with self._tx() as c:
             existing = c.execute(
@@ -227,7 +234,10 @@ class ControlPlane:
                 )
                 return eid
             seq = c.execute("SELECT COUNT(*) AS n FROM endpoints").fetchone()["n"]
-            eid = ep.get("id") or f"EP-{seq + 1:04d}"
+            # The id is always server-issued. The legacy JSON path passed in the
+            # client's own id, which meant two agents could claim the same EP-xxxx
+            # and a re-registration silently renumbered rows.
+            eid = f"EP-{seq + 1:04d}"
             c.execute(
                 """INSERT INTO endpoints (id, hostname, ip, os, version, status,
                    last_seen, registered, connector, extra)
@@ -267,16 +277,45 @@ class ControlPlane:
         row = self._conn.execute("SELECT * FROM endpoints WHERE id=?", (endpoint_id,)).fetchone()
         return dict(row) if row else None
 
+    def get_endpoint_by_host(self, hostname: str) -> dict[str, Any] | None:
+        """
+        Look up an endpoint by hostname alone.
+
+        Needed because upsert_endpoint keys on (hostname, ip): a host that
+        changes address -- DHCP lease, laptop on a new network -- looks new under
+        a composite key, and would file a second "new endpoint" incident for a
+        machine the analyst has already seen.
+        """
+        if not hostname:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM endpoints WHERE hostname = ? ORDER BY registered LIMIT 1",
+            (hostname.strip(),),
+        ).fetchone()
+        return dict(row) if row else None
+
     # ================= incidents =================
 
     def create_incident(self, inc: dict[str, Any], event_id: str | None = None) -> dict[str, Any]:
+        """
+        Insert an incident. Idempotent on id, so a legacy replay or a retried
+        request cannot duplicate history.
+
+        `event_id` links the incident to the event that caused it. It is
+        backfilled afterwards when the caller learns the id later (the operator
+        path creates the incident first, then ingests), because requiring the
+        caller to know the event id up front loses the link silently.
+        """
         now = iso()
         with self._tx() as c:
             seq = c.execute("SELECT COUNT(*) AS n FROM incidents").fetchone()["n"]
             inc_id = inc.get("id") or f"INC-{seq + 1:04d}"
-            # Idempotent on id: legacy replay must not create duplicates.
             if c.execute("SELECT 1 FROM incidents WHERE id=?", (inc_id,)).fetchone():
-                return self.get_incident(inc_id) or {}
+                existing = self.get_incident(inc_id) or {}
+                if event_id and not existing.get("event_id"):
+                    self.link_incident_event(inc_id, event_id)
+                    existing = self.get_incident(inc_id) or existing
+                return existing
             c.execute(
                 """INSERT INTO incidents (id, title, description, severity, status, source,
                    type, details, created, updated, event_id)
@@ -290,6 +329,17 @@ class ControlPlane:
                 ),
             )
             return self.get_incident(inc_id) or {}
+
+    def link_incident_event(self, inc_id: str, event_id: str) -> bool:
+        """Attach an event to an existing incident. No-op if already linked."""
+        with self._tx() as c:
+            if not c.execute("SELECT 1 FROM incidents WHERE id=?", (inc_id,)).fetchone():
+                return False
+            c.execute(
+                "UPDATE incidents SET event_id=COALESCE(event_id, ?), updated=? WHERE id=?",
+                (event_id, iso(), inc_id),
+            )
+        return True
 
     def update_incident(self, inc_id: str, status: str | None = None, note: str | None = None) -> bool:
         with self._tx() as c:
@@ -320,6 +370,13 @@ class ControlPlane:
         return d
 
     def list_incidents(self, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        """
+        List incidents, newest first, each with its notes.
+
+        Notes are joined in rather than left to a per-row follow-up query. The
+        dashboard renders a list of incidents with their notes, and loading them
+        lazily meant the list view silently showed no notes at all.
+        """
         if status:
             rows = self._conn.execute(
                 "SELECT * FROM incidents WHERE status=? ORDER BY created DESC LIMIT ?",
@@ -329,10 +386,27 @@ class ControlPlane:
             rows = self._conn.execute(
                 "SELECT * FROM incidents ORDER BY created DESC LIMIT ?", (limit,)
             ).fetchall()
+        ids = [r["id"] for r in rows]
+        notes_by_inc: dict[str, list[dict[str, Any]]] = {}
+        if ids:
+            # SQLite has no array bind, so chunk the IN clause. 400 keeps us well
+            # under the 999-variable default limit.
+            for chunk_start in range(0, len(ids), 400):
+                chunk = ids[chunk_start:chunk_start + 400]
+                marks = ",".join("?" * len(chunk))
+                for n in self._conn.execute(
+                    f"SELECT incident_id, text, author, ts FROM incident_notes "
+                    f"WHERE incident_id IN ({marks}) ORDER BY ts",
+                    chunk,
+                ).fetchall():
+                    notes_by_inc.setdefault(n["incident_id"], []).append(
+                        {"text": n["text"], "author": n["author"], "time": n["ts"]}
+                    )
         out = []
         for r in rows:
             d = dict(r)
             d["details"] = json.loads(d.get("details") or "{}")
+            d["notes"] = notes_by_inc.get(d["id"], [])
             out.append(d)
         return out
 
