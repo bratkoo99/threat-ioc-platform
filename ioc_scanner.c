@@ -526,8 +526,8 @@ int scan_file(const char *path) {
     char hash[65];
     sha256_file(path, hash);
     int hash_match = 0;
+    char h_family[128] = {0}, h_desc[256] = {0};
     if (hash[0] != '\0') {
-        char h_family[128], h_desc[256];
         hash_match = check_hash(hash, h_family, h_desc);
     }
 
@@ -544,9 +544,12 @@ int scan_file(const char *path) {
             printf("    Details:  %s\n", desc);
         }
         if (hash_match) {
+            /* Report the hash match's own family/description. Printing the
+             * filename-match buffers here showed empty fields for every
+             * hash-only detection, which is most of them. */
             printf("    Match:    Known malicious hash\n");
-            printf("    Family:   %s\n", family);
-            printf("    Details:  %s\n", desc);
+            printf("    Family:   %s\n", h_family);
+            printf("    Details:  %s\n", h_desc);
         }
         printf("\n");
         return 1;
@@ -833,6 +836,11 @@ int main(int argc, char *argv[]) {
         print_report();
     }
 
+    /* Capture the result before free_state(): free_state memsets the whole
+     * ScannerState, so reading state.threats_found after it returns 0 and the
+     * scanner always exited 0, silently breaking every caller that branches on
+     * the exit status. */
+    int found = (int)state.threats_found;
     free_state();
-    return (state.threats_found > 0) ? 2 : 0;
+    return (found > 0) ? 2 : 0;
 }

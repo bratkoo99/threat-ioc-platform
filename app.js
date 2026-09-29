@@ -4,8 +4,69 @@ let currentPage = 'dashboard';
 let sseSource = null;
 let currentIncidentId = null;
 
-// Initialize
-document.addEventListener('DOMContentLoaded', () => {
+// --- Authentication --------------------------------------------------------
+// The server requires a credential on every /api/* call. Rather than touching
+// every call site, route all of them through apiFetch() below, which attaches the
+// session cookie and surfaces a 401 by showing the login gate. EventSource cannot
+// set headers at all, which is the reason the session is cookie-based.
+function apiFetch(path, options) {
+    const opts = Object.assign({ credentials: 'same-origin' }, options || {});
+    return fetch(path, opts).then(res => {
+        if (res.status === 401) {
+            showLoginGate('Session expired or not authenticated.');
+            throw new Error('unauthorized');
+        }
+        return res;
+    });
+}
+
+function showLoginGate(message) {
+    const gate = document.getElementById('login-gate');
+    const app = document.getElementById('app');
+    if (gate) gate.style.display = 'flex';
+    if (app) app.style.display = 'none';
+    const err = document.getElementById('login-error');
+    if (err) err.textContent = message || '';
+}
+
+function hideLoginGate() {
+    const gate = document.getElementById('login-gate');
+    const app = document.getElementById('app');
+    if (gate) gate.style.display = 'none';
+    if (app) app.style.display = '';
+}
+
+async function login(key) {
+    const res = await fetch('/api/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key })
+    });
+    if (!res.ok) throw new Error('Invalid session key');
+    return true;
+}
+
+function initLogin() {
+    const form = document.getElementById('login-form');
+    if (!form) return;
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const input = document.getElementById('login-key');
+        const err = document.getElementById('login-error');
+        try {
+            await login(input.value.trim());
+            err.textContent = '';
+            hideLoginGate();
+            bootstrap();
+        } catch (ex) {
+            err.textContent = ex.message;
+        }
+    });
+}
+
+// Everything requiring a live connection, run only after a successful login.
+function bootstrap() {
     initNavigation();
     initSSE();
     loadStats();
@@ -14,8 +75,20 @@ document.addEventListener('DOMContentLoaded', () => {
     loadReports();
     updateTime();
     setInterval(updateTime, 1000);
-    // Load recent incidents after SSE is established
     setTimeout(loadRecentIncidents, 500);
+}
+
+// Initialize
+document.addEventListener('DOMContentLoaded', () => {
+    initLogin();
+    // The session cookie is HttpOnly, so JS cannot read it to check for a session.
+    // Probe one cheap endpoint instead and show the gate on 401.
+    apiFetch('/api/status')
+        .then(() => { hideLoginGate(); bootstrap(); })
+        .catch(err => {
+            if (err.message === 'unauthorized') showLoginGate();
+            else showLoginGate('Cannot reach the platform server.');
+        });
 });
 
 // Navigation
@@ -114,7 +187,7 @@ function initSSE() {
 // Load Stats
 async function loadStats() {
     try {
-        const res = await fetch('/api/stats');
+        const res = await apiFetch('/api/stats');
         const stats = await res.json();
 
         document.getElementById('stat-endpoints').textContent = stats.endpoints || 0;
@@ -134,7 +207,7 @@ async function loadStats() {
 // Load Recent Incidents
 async function loadRecentIncidents() {
     try {
-        const res = await fetch('/api/incidents/recent');
+        const res = await apiFetch('/api/incidents/recent');
         const data = await res.json();
         const container = document.getElementById('recent-incidents');
 
@@ -158,7 +231,7 @@ async function loadRecentIncidents() {
 // Load Inventory
 async function loadInventory() {
     try {
-        const res = await fetch('/api/inventory');
+        const res = await apiFetch('/api/inventory');
         const data = await res.json();
         const tbody = document.getElementById('inventory-body');
 
@@ -200,7 +273,7 @@ function refreshInventory() {
 // Load Incidents
 async function loadIncidents() {
     try {
-        const res = await fetch('/api/incidents');
+        const res = await apiFetch('/api/incidents');
         const data = await res.json();
         const tbody = document.getElementById('incidents-body');
 
@@ -251,7 +324,7 @@ function filterIncidents() {
 // Load Databases
 async function loadDatabases() {
     try {
-        const res = await fetch('/api/databases');
+        const res = await apiFetch('/api/databases');
         const data = await res.json();
         const tbody = document.getElementById('databases-body');
 
@@ -278,7 +351,7 @@ async function loadDatabases() {
 // Load Reports
 async function loadReports() {
     try {
-        const res = await fetch('/api/reports');
+        const res = await apiFetch('/api/reports');
         const data = await res.json();
         const tbody = document.getElementById('reports-body');
 
@@ -310,7 +383,7 @@ async function startScan() {
     const quick = mode === 'quick';
 
     try {
-        const res = await fetch('/api/scan/start', {
+        const res = await apiFetch('/api/scan/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path, quick, agent_id: agentId || undefined })
@@ -328,7 +401,7 @@ async function startScan() {
 
 async function stopScan() {
     try {
-        await fetch('/api/scan/stop', { method: 'POST' });
+        await apiFetch('/api/scan/stop', { method: 'POST' });
         addLog('Scan stopped', 'warning');
     } catch (e) {
         addLog('Error stopping scan: ' + e.message, 'error');
@@ -340,7 +413,7 @@ async function scanEndpoint(agentId) {
     if (!path) return;
 
     try {
-        const res = await fetch('/api/agent/scan', {
+        const res = await apiFetch('/api/agent/scan', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ agent_id: agentId, path, quick: false })
@@ -417,7 +490,7 @@ function addLog(message, type = 'info') {
 async function showIncidentDetail(id) {
     currentIncidentId = id;
     try {
-        const res = await fetch('/api/incidents');
+        const res = await apiFetch('/api/incidents');
         const data = await res.json();
         const inc = data.incidents.find(i => i.id === id);
         if (!inc) return;
@@ -449,7 +522,7 @@ function closeModal() {
 async function resolveIncident() {
     if (!currentIncidentId) return;
     try {
-        await fetch('/api/incidents/update', {
+        await apiFetch('/api/incidents/update', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: currentIncidentId, status: 'resolved', note: 'Marked resolved from web UI' })
@@ -502,7 +575,7 @@ function showAddDatabase() {
     const filename = `${name}_${type}.csv`;
     const content = type === 'hash' ? '# SHA-256 Hash,Family,Description\n' : '# Pattern,Family,Description,IsExtension\n';
     
-    fetch('/api/databases', {
+    apiFetch('/api/databases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: filename, content })
@@ -511,12 +584,12 @@ function showAddDatabase() {
 
 function deleteDatabase(name) {
     if (!confirm(`Delete database "${name}"?`)) return;
-    fetch('/api/databases/' + encodeURIComponent(name), { method: 'DELETE' })
+    apiFetch('/api/databases/' + encodeURIComponent(name), { method: 'DELETE' })
         .then(() => loadDatabases());
 }
 
 function viewReport(name) {
-    fetch('/api/reports/' + encodeURIComponent(name))
+    apiFetch('/api/reports/' + encodeURIComponent(name))
         .then(r => r.text())
         .then(text => {
             const w = window.open('', '_blank');

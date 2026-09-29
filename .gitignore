@@ -33,3 +33,12 @@ Thumbs.db
 *.tmp
 *.bak
 *~
+certs/
+.agent_key
+*.db
+*.db-wal
+*.db-shm
+inventory.json
+incidents.json
+reports/
+logs/

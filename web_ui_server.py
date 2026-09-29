@@ -14,12 +14,26 @@ import os
 import sys
 import time
 import re
-import hashlib
+import hmac
 import base64
+import hashlib
+import secrets
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timedelta
 
 PORT = 8443
+
+# --- TLS ------------------------------------------------------------------
+# 8443 is conventionally HTTPS. The previous version bound that port over
+# PLAINTEXT with no ssl import anywhere, so the agent key and every scan report
+# crossed the network in the clear while looking encrypted. TLS is now explicit
+# and on by default; the flag exists only for a loopback-only dev session.
+TLS_ENABLED = os.environ.get("TIOX_TLS", "1") not in ("0", "false", "no")
+CERT_FILE = os.environ.get("TIOX_CERT", os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "certs", "server.pem"))
+KEY_FILE = os.environ.get("TIOX_KEY", os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "certs", "server.key"))
+BIND_HOST = os.environ.get("TIOX_BIND", "127.0.0.1")  # not 0.0.0.0 by default
 PLATFORM_DIR = os.path.dirname(os.path.abspath(__file__))
 SCANNER_BIN = os.path.join(PLATFORM_DIR, "ioc_scanner")
 IOC_DB_DIR = os.path.join(PLATFORM_DIR, "ioc_databases")
@@ -29,13 +43,50 @@ AGENT_KEY_FILE = os.path.join(PLATFORM_DIR, ".agent_key")
 INVENTORY_FILE = os.path.join(PLATFORM_DIR, "inventory.json")
 INCIDENTS_FILE = os.path.join(PLATFORM_DIR, "incidents.json")
 
-# Generate agent key if not exists
-if not os.path.exists(AGENT_KEY_FILE):
-    with open(AGENT_KEY_FILE, "w") as f:
-        f.write(base64.b64encode(os.urandom(32)).decode())
+# --- Auth ----------------------------------------------------------------
+# There was no authentication anywhere in this file. GET /api/agent/key handed
+# the agent key to any caller that reached the port, and every /api/* endpoint
+# (scan control, incident mutation, endpoint registration) was open. Now:
+#   * two credentials, so a leaked agent key cannot read the UI or mutate state
+#   * constant-time comparison, so the key cannot be recovered by timing
+#   * /api/agent/key is itself protected, which is the point
+#   * auth is enforced on the request handler, so a new endpoint is covered by
+#     default rather than by remembering to guard it
 
-with open(AGENT_KEY_FILE) as f:
-    AGENT_KEY = f.read().strip()
+AGENT_KEY = os.environ.get("TIOX_AGENT_KEY", "")
+SESSION_KEY = os.environ.get("TIOX_SESSION_KEY", "")
+
+# Endpoints that must work before any credential exists (bootstrap only).
+PUBLIC_PATHS = {"/", "/index.html", "/style.css", "/app.js", "/api/status"}
+
+# Agent-facing endpoints authenticate with the agent key.
+AGENT_PATHS = ("/api/agent/register", "/api/agent/heartbeat", "/api/agent/scan")
+
+# Name of the browser session cookie set by /api/login.
+SESSION_COOKIE = "tiox_session"
+COOKIE_MAX_AGE = 28800  # 8h, matching a working day for an analyst
+
+
+def ensure_key_file(path, existing=""):
+    """Load a key from env or the on-disk file, generating one if needed."""
+    if existing:
+        return existing
+    if os.path.exists(path):
+        with open(path) as f:
+            return f.read().strip()
+    key = secrets.token_urlsafe(32)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(key)
+    return key
+
+
+def _const_eq(a, b):
+    return hmac.compare_digest((a or "").encode(), (b or "").encode())
+
+
+AGENT_KEY = ensure_key_file(AGENT_KEY_FILE, AGENT_KEY)
+SESSION_KEY = SESSION_KEY or secrets.token_urlsafe(32)
 
 # Global scan state
 scan_state = {
@@ -249,12 +300,83 @@ def run_scan(scan_path, quick_mode=False, agent_id=None):
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    # --- authentication ---
+
+    @property
+    def is_https(self):
+        """True when this request arrived over TLS. Used to set Secure on cookies."""
+        import ssl
+
+        return isinstance(self.connection, ssl.SSLSocket)
+
+    def _presented_key(self):
+        """
+        Extract a bearer token from the Authorization header, X-API-Key, or the
+        session cookie.
+
+        The cookie exists because EventSource cannot set request headers, so the
+        dashboard's live event stream would otherwise be the one authenticated
+        request with no way to carry a credential.
+        """
+        auth = self.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        if auth.lower().startswith("token "):
+            return auth[6:].strip()
+        hdr = self.headers.get("X-API-Key", "").strip()
+        if hdr:
+            return hdr
+        cookie = self.headers.get("Cookie", "")
+        for part in cookie.split(";"):
+            name, _, val = part.strip().partition("=")
+            if name == SESSION_COOKIE and val:
+                return val.strip()
+        return ""
+
+    def is_authorized(self, path):
+        """
+        Central auth gate. Called at the top of do_GET/do_POST so that a newly
+        added endpoint is protected by default instead of relying on the author
+        remembering to guard it. Public routes are an explicit allowlist.
+        """
+        if path in PUBLIC_PATHS or path == "/api/login":
+            return True
+        presented = self._presented_key()
+        if not presented:
+            return False
+        if path in AGENT_PATHS:
+            return _const_eq(presented, AGENT_KEY)
+        # Everything else needs the session key; the agent key is not enough, so
+        # a compromised endpoint cannot read the dashboard or mutate incidents.
+        return _const_eq(presented, SESSION_KEY)
+
+    def require_auth(self, path):
+        if self.is_authorized(path):
+            return True
+        self.send_json({
+            "error": "Unauthorized",
+            "hint": "Send 'Authorization: Bearer <key>'. "
+                    "Agent key for /api/agent/*, session key for everything else.",
+        }, 401)
+        return False
+
     def do_GET(self):
         global scan_state
         parsed = urlparse(self.path)
 
+        if not self.require_auth(parsed.path):
+            return
+
         if parsed.path in ("/", "/index.html"):
             self.serve_file("index.html", "text/html")
+        elif parsed.path == "/api/logout":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header(
+                "Set-Cookie", f"{SESSION_COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict"
+            )
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True}).encode())
         elif parsed.path == "/style.css":
             self.serve_file("style.css", "text/css")
         elif parsed.path == "/app.js":
@@ -275,9 +397,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             inc = get_incidents()
             self.send_json({"incidents": inc["incidents"][:10], "total": inc["total"]})
         elif parsed.path == "/api/agent/key":
+            # Requires the session key: handing the agent key to anyone who can
+            # reach the port let them register a rogue endpoint and request scans.
+            # Deliver it once, to an operator who already has admin.
             self.send_json({"key": AGENT_KEY})
         elif parsed.path == "/api/agent/script":
-            self.serve_agent_script()
+            self.serve_agent_script(tls=TLS_ENABLED)
         elif parsed.path == "/api/stats":
             self.send_stats()
         else:
@@ -287,7 +412,38 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         global scan_state
         parsed = urlparse(self.path)
 
-        if parsed.path == "/api/scan/start":
+        if not self.require_auth(parsed.path):
+            return
+
+        if parsed.path == "/api/login":
+            # Exchange the session key for a cookie. The dashboard's JS cannot set
+            # headers on an EventSource, and repeatedly embedding a bearer token in
+            # page JS is worse, so the browser holds a cookie instead.
+            body = self.read_body()
+            if body is None:
+                self.send_json({"error": "Request too large"}, 413)
+                return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON"}, 400)
+                return
+            if not _const_eq(str(data.get("key", "")), SESSION_KEY):
+                self.send_json({"error": "Invalid credentials"}, 401)
+                return
+            secure = "; Secure" if self.is_https else ""
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header(
+                "Set-Cookie",
+                f"{SESSION_COOKIE}={SESSION_KEY}; HttpOnly; Path=/; "
+                f"Max-Age={COOKIE_MAX_AGE}; SameSite=Strict{secure}",
+            )
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True}).encode())
+
+        elif parsed.path == "/api/scan/start":
             body = self.read_body()
             if body is None:
                 self.send_json({"error": "Request too large"}, 413)
@@ -499,7 +655,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # Was "*", which let any page on the internet open an event stream against
+        # this server. Same-origin only; the dashboard is served by this host.
+        self.send_header("Access-Control-Allow-Origin", f"https://{self.headers.get('Host', 'localhost')}")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         with sse_lock:
             sse_clients.append(self.wfile)
@@ -520,27 +679,42 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if self.wfile in sse_clients:
                     sse_clients.remove(self.wfile)
 
-    def serve_agent_script(self):
-        script = self.generate_agent_script()
+    def serve_agent_script(self, tls=True):
+        script = self.generate_agent_script(tls=tls)
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", len(script))
         self.end_headers()
         self.wfile.write(script.encode())
 
-    def generate_agent_script(self):
+    def generate_agent_script(self, tls=True):
         return f'''#!/usr/bin/env bash
 # IOC Scanner Agent - Remote endpoint agent
 # Install on servers to enable remote scanning from main platform
 
 AGENT_KEY="{AGENT_KEY}"
-SERVER_URL="${{SERVER_URL:-http://localhost:{PORT}}}"
+SERVER_URL="${{SERVER_URL:-{'https' if tls else 'http'}://${{TIOX_HOST:-127.0.0.1}}:{PORT}}}"
 AGENT_ID=""
 LOG_FILE="/var/log/ioc_agent.log"
 SCAN_DIR="/"
+# Skip TLS verification: the platform ships a self-signed cert. Remove this
+# once you have a real CA-signed cert, because with -k on there is no protection
+# against an active network attacker on this hop.
+CURL_OPTS="--insecure -sf"
 
 log() {{
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}}
+
+api() {{
+    # All /api/agent/* calls carry the agent key. Without this header the server
+    # returns 401; the previous agent script sent nothing and relied on the
+    # server having no authentication at all.
+    local path="$1"; shift
+    curl $CURL_OPTS -X POST "$SERVER_URL$path" \\
+        -H "Authorization: Bearer $AGENT_KEY" \\
+        -H "Content-Type: application/json" \\
+        "$@"
 }}
 
 get_hostname() {{
@@ -570,9 +744,7 @@ register() {{
 EOF
 )
     local response
-    response=$(curl -sf -X POST "$SERVER_URL/api/agent/register" \\
-        -H "Content-Type: application/json" \\
-        -d "$payload" 2>/dev/null)
+    response=$(api /api/agent/register -d "$payload" 2>/dev/null)
     
     if [ $? -eq 0 ]; then
         AGENT_ID=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
@@ -587,10 +759,9 @@ EOF
 
 heartbeat() {{
     [ -z "$AGENT_ID" ] && return
-    curl -sf -X POST "$SERVER_URL/api/agent/heartbeat" \\
-        -H "Content-Type: application/json" \\
+    api /api/agent/heartbeat \\
         -d "{{\\"agent_id\\":\\"$AGENT_ID\\",\\"ip\\":\\"$(get_ip)\\"}}" \\
-        --connect-timeout 5 --max-time 10 > /dev/null 2>&1
+        --connect-timeout 5 --max-time 10 > /dev/null 2>&1 || true
 }}
 
 do_scan() {{
@@ -625,10 +796,9 @@ do_scan() {{
     log "Scan complete: $scanned files scanned, $threats threats found"
     
     # Report results
-    curl -sf -X POST "$SERVER_URL/api/agent/heartbeat" \\
-        -H "Content-Type: application/json" \\
+    api /api/agent/heartbeat \\
         -d "{{\\"agent_id\\":\\"$AGENT_ID\\",\\"last_scan\\":\\"$(date -Iseconds)\\",\\"threats\\":$threats}}" \\
-        --connect-timeout 5 --max-time 10 > /dev/null 2>&1
+        --connect-timeout 5 --max-time 10 > /dev/null 2>&1 || true
 }}
 
 # Main
@@ -693,28 +863,87 @@ esac
         pass
 
 
+class ThreadedHTTPSServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def build_server():
+    """
+    Create the server, wrapping the socket in TLS when enabled.
+
+    Raises RuntimeError with an actionable message if TLS is on but no cert
+    exists, rather than silently falling back to cleartext on port 8443.
+    """
+    httpd = ThreadedHTTPSServer((BIND_HOST, PORT), Handler)
+
+    if not TLS_ENABLED:
+        print("  [!] TLS DISABLED (TIOX_TLS=0) - traffic is cleartext.")
+        print("      Only acceptable for a loopback dev session.")
+        return httpd, False
+
+    if not (os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE)):
+        httpd.server_close()
+        raise RuntimeError(
+            f"TLS is enabled but no certificate found.\n"
+            f"  expected cert: {CERT_FILE}\n"
+            f"  expected key:  {KEY_FILE}\n\n"
+            f"Generate a self-signed pair:\n"
+            f"  mkdir -p {os.path.dirname(CERT_FILE)}\n"
+            f"  openssl req -x509 -newkey rsa:4096 -nodes -days 365 \\\n"
+            f"    -keyout {KEY_FILE} -out {CERT_FILE} \\\n"
+            f"    -subj '/CN=threat-platform'\n\n"
+            f"Or set TIOX_CERT / TIOX_KEY to an existing pair.\n"
+            f"To run in cleartext for local dev only, set TIOX_TLS=0."
+        )
+
+    import ssl
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    return httpd, True
+
+
 def main():
-    os.makedirs(IOC_DB_DIR, exist_ok=True)
-    os.makedirs(REPORT_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR, exist_ok=True)
+    for d in (IOC_DB_DIR, REPORT_DIR, LOG_DIR):
+        os.makedirs(d, exist_ok=True)
 
     if not os.path.exists(SCANNER_BIN):
         print(f"[!] Scanner binary not found: {SCANNER_BIN}")
-        print("[!] Compile it first: cd 'Bussiness Platform Proposal' && make")
+        print("[!] Compile it first: make")
         print()
 
-    with socketserver.ThreadingTCPServer(("", PORT), Handler) as httpd:
-        print(f"  IOC Scanner Web UI Dashboard")
-        print(f"  Platform: {PLATFORM_DIR}")
-        print(f"  Open: http://localhost:{PORT}")
-        print(f"  Press Ctrl+C to stop")
+    try:
+        httpd, tls = build_server()
+    except RuntimeError as exc:
+        print(f"[!] {exc}")
+        return 1
+
+    scheme = "https" if tls else "http"
+    with httpd:
+        print("  IOC Scanner Web UI Dashboard")
+        print(f"  Platform:  {PLATFORM_DIR}")
+        print(f"  Binding:   {BIND_HOST}:{PORT} ({scheme})")
+        print(f"  Open:      {scheme}://{BIND_HOST}:{PORT}")
+        if tls:
+            print("  Note:      self-signed cert -> your browser will warn once.")
+        print()
+        print("  Credentials (printed once; the session key is not persisted):")
+        print(f"    session key: {SESSION_KEY}")
+        print(f"    agent key:   {AGENT_KEY}   (.agent_key, mode 0600)")
+        print()
+        print("  Use:  curl -H 'Authorization: Bearer <session key>' \\")
+        print("             http://<host>:<port>/api/status")
         print()
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
             print("\n  Shutting down...")
             httpd.shutdown()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -7,7 +7,33 @@
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-    <div class="app">
+    <!-- Login gate: shown until a valid session key is exchanged for a cookie.
+         Kept outside .app so the dashboard is not interactive before auth. -->
+    <div id="login-gate" style="display:none; position:fixed; inset:0; z-index:1000;
+                background:#0b1220; align-items:center; justify-content:center;">
+        <form id="login-form" style="background:#111a2e; border:1px solid #1f2d4a;
+                border-radius:10px; padding:32px 36px; width:340px;">
+            <h2 style="margin:0 0 4px; color:#e6edf7; font-size:18px;">IOC Scanner</h2>
+            <p style="margin:0 0 20px; color:#7d8db0; font-size:13px;">
+                Enter the session key printed by the server on startup.
+            </p>
+            <input type="password" id="login-key" autocomplete="off" autofocus
+                   placeholder="session key"
+                   style="width:100%; box-sizing:border-box; padding:10px 12px;
+                          background:#0b1220; color:#e6edf7; font-size:14px;
+                          border:1px solid #1f2d4a; border-radius:6px;">
+            <p id="login-error" style="color:#ff6b6b; font-size:12px; min-height:16px;
+                                   margin:8px 0 0;"></p>
+            <button type="submit"
+                    style="width:100%; margin-top:12px; padding:10px;
+                           background:#3b82f6; color:#fff; border:none;
+                           border-radius:6px; font-size:14px; cursor:pointer;">
+                Sign in
+            </button>
+        </form>
+    </div>
+
+    <div class="app" id="app">
         <!-- Sidebar -->
         <nav class="sidebar">
             <div class="logo">
